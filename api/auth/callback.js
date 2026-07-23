@@ -18,8 +18,8 @@ const POINTS_PER_SCAN = 10; // ปรับจำนวนแต้มต่อ�
 const TIERS = [
   { name: 'Bronze', min: 0, color: '#a67c52' },
   { name: 'Silver', min: 100, color: '#9ca3af' },
-  { name: 'Gold', min: 300, color: '#d4a017' },
-  { name: 'Platinum', min: 700, color: '#5b6472' },
+  { name: 'Gold', min: 500, color: '#d4a017' },
+  { name: 'Platinum', min: 1000, color: '#5b6472' },
 ];
 
 function getTier(lifetimePoints) {
