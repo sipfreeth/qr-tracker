@@ -3,14 +3,9 @@
 // GET: แสดงฟอร์ม login
 // POST: เช็ค username/password กับตาราง admin_users แล้วออก session cookie
 
-import { createClient } from '@supabase/supabase-js';
 import bcrypt from 'bcryptjs';
+import { supabase } from '../../lib/supabaseClient.js';
 import { createSessionCookie } from '../../lib/adminAuth.js';
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
 
 export default async function handler(req, res) {
   if (req.method === 'GET') {
