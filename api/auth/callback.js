@@ -5,6 +5,7 @@
 // เช็คจาก state ว่ามาจากทางไหน แล้วทำหน้าที่ต่างกัน
 
 import { createClient } from '@supabase/supabase-js';
+import { getTier } from '../../lib/tiers.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -12,25 +13,6 @@ const supabase = createClient(
 );
 
 const POINTS_PER_SCAN = 10; // ปรับจำนวนแต้มต่อครั้งได้ตรงนี้
-
-// ระดับสมาชิก เรียงจากแต้มสะสมทั้งชีวิตน้อย -> มาก
-// ปรับชื่อระดับ, เกณฑ์แต้ม, หรือเพิ่ม/ลดจำนวนระดับได้ตรงนี้
-const TIERS = [
-  { name: 'Bronze', min: 0, color: '#a67c52' },
-  { name: 'Silver', min: 100, color: '#9ca3af' },
-  { name: 'Gold', min: 500, color: '#d4a017' },
-  { name: 'Platinum', min: 1000, color: '#5b6472' },
-];
-
-function getTier(lifetimePoints) {
-  // หาระดับสูงสุดที่แต้มสะสมถึงเกณฑ์
-  let current = TIERS[0];
-  for (const tier of TIERS) {
-    if (lifetimePoints >= tier.min) current = tier;
-  }
-  const next = TIERS.find((t) => t.min > lifetimePoints) || null;
-  return { current, next, pointsToNext: next ? next.min - lifetimePoints : 0 };
-}
 
 export default async function handler(req, res) {
   const { code, state } = req.query;
