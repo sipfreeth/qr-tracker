@@ -2,10 +2,11 @@
 //
 // URL: https://your-project.vercel.app/api/admin/dashboard
 // ป้องกันด้วย Basic Auth (username อะไรก็ได้ / password = ADMIN_PASSWORD ที่ตั้งไว้ใน Env Variables)
-// เบราว์เซอร์จะเด้ง popup ให้กรอก username/password เอง
+//
+// เพิ่ม ?tier=Gold ต่อท้าย URL เพื่อดูเฉพาะสมาชิก Tier นั้น
 
 import { createClient } from '@supabase/supabase-js';
-import { getTier, TIERS } from '../../lib/tiers.js';
+import { getTier, TIERS, getTierEvaluationPeriod, getCurrentYearStart } from '../../lib/tiers.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -27,20 +28,25 @@ export default async function handler(req, res) {
     return;
   }
 
-  // ดึงข้อมูลทั้งหมดที่ต้องใช้แบบขนานกัน
-  const [scanLogsRes, membersRes, redemptionsRes] = await Promise.all([
+  const tierFilter = req.query.tier || null;
+  const yearStart = getCurrentYearStart();
+
+  const [scanLogsRes, membersRes, redemptionsRes, allLedgerRes] = await Promise.all([
     supabase.from('scan_logs').select('creative_id, scanned_at'),
-    supabase.from('members').select('id, lifetime_points, points_balance'),
+    supabase.from('members').select('id, line_user_id, display_name, created_at'),
     supabase
       .from('redemptions')
-      .select('id, redemption_code, points_spent, status, created_at, rewards(name), members(display_name, line_user_id)')
+      .select('id, member_id, redemption_code, points_spent, status, created_at, rewards(name), members(display_name, line_user_id)')
       .order('created_at', { ascending: false })
       .limit(50),
+    // ดึง ledger ทั้งหมดมาคำนวณเองในโค้ด (ง่ายกว่าคิว query แยกทีละคนเวลามีสมาชิกไม่เยอะ)
+    supabase.from('points_ledger').select('member_id, tier_score, reward_points, created_at').eq('reason', 'scan_qr'),
   ]);
 
   const scanLogs = scanLogsRes.data || [];
   const members = membersRes.data || [];
   const redemptions = redemptionsRes.data || [];
+  const ledger = allLedgerRes.data || [];
 
   // สรุปยอดสแกนแยกตาม creative
   const scansByCreative = {};
@@ -51,14 +57,41 @@ export default async function handler(req, res) {
     if (new Date(row.scanned_at).toDateString() === today) scansToday++;
   }
 
-  // สรุปจำนวนสมาชิกแยกตาม Tier
-  const tierCounts = Object.fromEntries(TIERS.map((t) => [t.name, 0]));
-  for (const m of members) {
-    tierCounts[getTier(m.lifetime_points).current.name]++;
+  // Point ที่ใช้ไปปีนี้ต่อสมาชิก (สำหรับคำนวณ Point คงเหลือ)
+  const spentThisYearByMember = {};
+  for (const r of redemptions) {
+    if (new Date(r.created_at) >= new Date(yearStart)) {
+      spentThisYearByMember[r.member_id] = (spentThisYearByMember[r.member_id] || 0) + r.points_spent;
+    }
   }
 
-  const totalPointsIssued = members.reduce((sum, m) => sum + m.lifetime_points, 0);
-  const pendingRedemptions = redemptions.filter((r) => r.status === 'pending');
+  const totalTierScoreIssued = ledger.reduce((sum, row) => sum + row.tier_score, 0);
+  const totalPointsIssued = ledger.reduce((sum, row) => sum + row.reward_points, 0);
+
+  // คำนวณ Tier Score (ช่วงประเมิน) และ Point คงเหลือ (ปีนี้) ต่อสมาชิกแต่ละคน
+  const membersWithStats = members.map((m) => {
+    const { start, end } = getTierEvaluationPeriod(m.created_at);
+    const startDate = new Date(start);
+    const endDate = end ? new Date(end) : null;
+
+    let tierScore = 0;
+    let pointsEarnedThisYear = 0;
+    for (const row of ledger) {
+      if (row.member_id !== m.id) continue;
+      const rowDate = new Date(row.created_at);
+      if (rowDate >= startDate && (!endDate || rowDate < endDate)) tierScore += row.tier_score;
+      if (rowDate >= new Date(yearStart)) pointsEarnedThisYear += row.reward_points;
+    }
+
+    const spendableBalance = pointsEarnedThisYear - (spentThisYearByMember[m.id] || 0);
+    return { ...m, tierScore, spendableBalance, tier: getTier(tierScore).current };
+  });
+
+  const tierCounts = Object.fromEntries(TIERS.map((t) => [t.name, 0]));
+  for (const m of membersWithStats) tierCounts[m.tier.name]++;
+
+  const pendingCount = redemptions.filter((r) => r.status === 'pending').length;
+  const filteredMembers = tierFilter ? membersWithStats.filter((m) => m.tier.name === tierFilter) : membersWithStats;
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.status(200).send(renderDashboard({
@@ -67,9 +100,12 @@ export default async function handler(req, res) {
     scansByCreative,
     totalMembers: members.length,
     tierCounts,
+    totalTierScoreIssued,
     totalPointsIssued,
     redemptions,
-    pendingCount: pendingRedemptions.length,
+    pendingCount,
+    members: filteredMembers,
+    tierFilter,
   }));
 }
 
@@ -79,13 +115,30 @@ function renderDashboard(d) {
     .map(([id, count]) => `<tr><td>${id}</td><td style="text-align:right;">${count}</td></tr>`)
     .join('');
 
-  const tierRows = TIERS.map(
-    (t) => `
-      <div class="stat-pill" style="border-color:${t.color};">
+  const tierRows = TIERS.map((t) => {
+    const isActive = d.tierFilter === t.name;
+    return `
+      <a href="/api/admin/dashboard?tier=${encodeURIComponent(t.name)}" class="stat-pill" style="border-color:${t.color}; ${isActive ? `background:${t.color}1a;` : ''}">
         <span style="color:${t.color};">${t.name}</span>
         <strong>${d.tierCounts[t.name] || 0}</strong>
-      </div>`
-  ).join('');
+      </a>`;
+  }).join('');
+
+  const clearFilterLink = d.tierFilter ? `<a href="/api/admin/dashboard" class="clear-filter">ล้างฟิลเตอร์ (ดูทั้งหมด)</a>` : '';
+
+  const memberRows = d.members
+    .sort((a, b) => b.tierScore - a.tierScore)
+    .map(
+      (m) => `
+        <tr>
+          <td>${m.display_name || m.line_user_id}</td>
+          <td><span class="tier-tag" style="background:${m.tier.color};">${m.tier.name}</span></td>
+          <td style="text-align:right;">${m.tierScore.toLocaleString()}</td>
+          <td style="text-align:right;">${m.spendableBalance.toLocaleString()}</td>
+          <td>${new Date(m.created_at).toLocaleDateString('th-TH')}</td>
+        </tr>`
+    )
+    .join('');
 
   const redemptionRows = d.redemptions
     .map((r) => {
@@ -124,13 +177,16 @@ function renderDashboard(d) {
   .card .label { font-size: 13px; color: #6b7280; margin: 0 0 4px; }
   .card .value { font-size: 28px; font-weight: 700; margin: 0; }
   .section { background: white; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-  h2 { font-size: 16px; margin: 0 0 12px; }
+  h2 { font-size: 16px; margin: 0 0 4px; display: inline-block; }
+  .hint { font-size: 12px; color: #9ca3af; margin: 0 0 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th { text-align: left; color: #6b7280; font-weight: 500; padding: 6px 4px; border-bottom: 1px solid #e5e7eb; }
   td { padding: 8px 4px; border-bottom: 1px solid #f0f0f0; }
-  .stat-pill { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; border: 1.5px solid; border-radius: 10px; padding: 8px 16px; margin-right: 8px; font-size: 13px; font-weight: 600; }
+  .stat-pill { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; border: 1.5px solid; border-radius: 10px; padding: 8px 16px; margin-right: 8px; font-size: 13px; font-weight: 600; text-decoration: none; cursor: pointer; }
   .btn-small { background: #06c755; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
   .badge-used { color: #9ca3af; font-size: 12px; }
+  .tier-tag { color: white; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
+  .clear-filter { font-size: 12px; color: #2a78d6; margin-left: 8px; }
 </style>
 </head>
 <body>
@@ -140,13 +196,24 @@ function renderDashboard(d) {
     <div class="card"><p class="label">สแกนทั้งหมด</p><p class="value">${d.totalScans.toLocaleString()}</p></div>
     <div class="card"><p class="label">สแกนวันนี้</p><p class="value">${d.scansToday.toLocaleString()}</p></div>
     <div class="card"><p class="label">สมาชิกทั้งหมด</p><p class="value">${d.totalMembers.toLocaleString()}</p></div>
-    <div class="card"><p class="label">แต้มที่แจกไปทั้งหมด</p><p class="value">${d.totalPointsIssued.toLocaleString()}</p></div>
+    <div class="card"><p class="label">Tier Score ที่แจกไปทั้งหมด</p><p class="value">${d.totalTierScoreIssued.toLocaleString()}</p></div>
+    <div class="card"><p class="label">Point ที่แจกไปทั้งหมด</p><p class="value">${d.totalPointsIssued.toLocaleString()}</p></div>
     <div class="card"><p class="label">รอยืนยัน Redemption</p><p class="value" style="color:${d.pendingCount > 0 ? '#e76f51' : '#1b1f27'};">${d.pendingCount}</p></div>
   </div>
 
   <div class="section">
     <h2>สมาชิกแยกตาม Tier</h2>
-    <div>${tierRows}</div>
+    <p class="hint">Tier ปีนี้ล็อกจากยอด Tier Score ของปีที่แล้ว (สมาชิกใหม่ปีนี้ใช้ยอดสะสมปัจจุบัน) — กดป้ายเพื่อดูรายชื่อ</p>
+    <div>${tierRows}${clearFilterLink}</div>
+  </div>
+
+  <div class="section">
+    <h2>รายชื่อสมาชิก${d.tierFilter ? ` — Tier ${d.tierFilter}` : ''}</h2>
+    <p class="hint">${d.members.length.toLocaleString()} คน</p>
+    <table>
+      <tr><th>ชื่อ</th><th>Tier</th><th style="text-align:right;">Tier Score</th><th style="text-align:right;">Point คงเหลือ</th><th>สมัครเมื่อ</th></tr>
+      ${memberRows || '<tr><td colspan="5" style="color:#6b7280;">ไม่มีสมาชิกในกลุ่มนี้</td></tr>'}
+    </table>
   </div>
 
   <div class="section">
@@ -160,7 +227,7 @@ function renderDashboard(d) {
   <div class="section">
     <h2>ประวัติการแลกของรางวัล (50 รายการล่าสุด)</h2>
     <table>
-      <tr><th>วันที่</th><th>สมาชิก</th><th>ของรางวัล</th><th style="text-align:center;">โค้ด</th><th style="text-align:right;">แต้ม</th><th style="text-align:center;">สถานะ</th></tr>
+      <tr><th>วันที่</th><th>สมาชิก</th><th>ของรางวัล</th><th style="text-align:center;">โค้ด</th><th style="text-align:right;">Point</th><th style="text-align:center;">สถานะ</th></tr>
       ${redemptionRows || '<tr><td colspan="6" style="color:#6b7280;">ยังไม่มีการแลก</td></tr>'}
     </table>
   </div>

@@ -1,18 +1,61 @@
 // api/auth/callback.js
 //
 // LINE จะ redirect กลับมาที่นี่หลังคนกดยินยอมล็อกอิน ไม่ว่าจะมาจาก
-// การสแกน QR (api/qr/[creative].js) หรือมาจากลิงก์เช็คแต้ม (api/points.js)
+// การสแกน QR, เช็คแต้ม, ดูของรางวัล, หรือกดแลกของรางวัล
 // เช็คจาก state ว่ามาจากทางไหน แล้วทำหน้าที่ต่างกัน
+//
+// ระบบนี้แยก 2 อย่างออกจากกันชัดเจน:
+//   - Tier Score: ได้จาก engagement (1 ครั้ง = 1 คะแนน) ใช้ตัดสิน Tier เท่านั้น ไม่ใช้แลกอะไร
+//                 Tier ของปีนี้ทั้งปี ถูกล็อกจากยอด Tier Score ของ "ปีที่แล้วทั้งปี"
+//   - Point: ได้จาก engagement เดียวกัน (1 ครั้ง = 5 แต้ม ปรับได้) ใช้แลก Reward
+//            หมดอายุทุกสิ้นปี ถ้าไม่ใช้ (นับแค่ยอดที่ได้ในปีปฏิทินปัจจุบัน)
+//   - ทั้งสองอย่างได้จาก 1 Campaign (creative) แค่ครั้งเดียวเท่านั้น ห้ามซ้ำ
 
 import { createClient } from '@supabase/supabase-js';
-import { getTier } from '../../lib/tiers.js';
+import { getTier, getTierEvaluationPeriod, getCurrentYearStart } from '../../lib/tiers.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const POINTS_PER_SCAN = 10; // ปรับจำนวนแต้มต่อครั้งได้ตรงนี้
+const TIER_SCORE_PER_ENGAGEMENT = 1; // ปรับได้ แต่ปกติไม่ควรแก้ (นิยาม 1 engagement = 1 คะแนน)
+const REWARD_POINTS_PER_ENGAGEMENT = 5; // ปรับจำนวนแต้มต่อ engagement ได้ตรงนี้
+
+// หา Tier Score ในช่วงเวลาที่ใช้ตัดสิน Tier (ปีที่แล้วทั้งปี หรือปีนี้ถ้าเป็นสมาชิกใหม่)
+async function getTierScoreForEvaluation(memberId, createdAt) {
+  const { start, end } = getTierEvaluationPeriod(createdAt);
+  let query = supabase
+    .from('points_ledger')
+    .select('tier_score')
+    .eq('member_id', memberId)
+    .eq('reason', 'scan_qr')
+    .gte('created_at', start);
+  if (end) query = query.lt('created_at', end);
+  const { data } = await query;
+  return (data || []).reduce((sum, row) => sum + row.tier_score, 0);
+}
+
+// หา Point คงเหลือที่ใช้แลกได้ (ได้ปีนี้ - ใช้ไปปีนี้) หมดอายุทุกสิ้นปี
+async function getSpendableBalance(memberId) {
+  const yearStart = getCurrentYearStart();
+  const [earnedRes, spentRes] = await Promise.all([
+    supabase
+      .from('points_ledger')
+      .select('reward_points')
+      .eq('member_id', memberId)
+      .eq('reason', 'scan_qr')
+      .gte('created_at', yearStart),
+    supabase
+      .from('redemptions')
+      .select('points_spent')
+      .eq('member_id', memberId)
+      .gte('created_at', yearStart),
+  ]);
+  const earned = (earnedRes.data || []).reduce((sum, row) => sum + row.reward_points, 0);
+  const spent = (spentRes.data || []).reduce((sum, row) => sum + row.points_spent, 0);
+  return earned - spent;
+}
 
 export default async function handler(req, res) {
   const { code, state } = req.query;
@@ -30,7 +73,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  // ขั้นที่ 1: เอา code ไปแลก token กับ LINE (เหมือนกันทั้ง 2 ทาง)
+  // ขั้นที่ 1: เอา code ไปแลก token กับ LINE (เหมือนกันทุกทาง)
   const tokenRes = await fetch('https://api.line.me/oauth2/v2.1/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -57,10 +100,10 @@ export default async function handler(req, res) {
   const displayName = payload.name || null;
   const pictureUrl = payload.picture || null;
 
-  // ขั้นที่ 2: หาสมาชิกเดิม หรือสร้างใหม่ถ้ายังไม่เคยเจอ (เหมือนกันทั้ง 2 ทาง)
+  // ขั้นที่ 2: หาสมาชิกเดิม หรือสร้างใหม่ถ้ายังไม่เคยเจอ
   let { data: member } = await supabase
     .from('members')
-    .select('id, points_balance, lifetime_points, display_name, picture_url')
+    .select('id, display_name, picture_url, created_at')
     .eq('line_user_id', lineUserId)
     .single();
 
@@ -68,7 +111,7 @@ export default async function handler(req, res) {
     const { data: newMember, error: insertError } = await supabase
       .from('members')
       .insert({ line_user_id: lineUserId, display_name: displayName, picture_url: pictureUrl })
-      .select('id, points_balance, lifetime_points, display_name, picture_url')
+      .select('id, display_name, picture_url, created_at')
       .single();
 
     if (insertError) {
@@ -79,34 +122,38 @@ export default async function handler(req, res) {
     member = newMember;
   }
 
-  // ทางที่ 1: มาจากลิงก์เช็คแต้ม — ไม่ต้องบวกแต้ม แค่โชว์หน้าสรุป
+  // ทางที่ 1: มาจากลิงก์เช็คแต้ม
   if (parsedState.action === 'view_points') {
-    const { data: history } = await supabase
-      .from('points_ledger')
-      .select('points, creative_id, reason, created_at')
-      .eq('member_id', member.id)
-      .order('created_at', { ascending: false })
-      .limit(20);
+    const [tierScore, spendableBalance, historyRes] = await Promise.all([
+      getTierScoreForEvaluation(member.id, member.created_at),
+      getSpendableBalance(member.id),
+      supabase
+        .from('points_ledger')
+        .select('reward_points, tier_score, creative_id, reason, created_at')
+        .eq('member_id', member.id)
+        .order('created_at', { ascending: false })
+        .limit(20),
+    ]);
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(renderPointsPage(member, history || []));
+    res.status(200).send(renderPointsPage(member, historyRes.data || [], tierScore, spendableBalance));
     return;
   }
 
-  // ทางที่ 3: มาจากลิงก์ดูของรางวัล — โชว์รายการให้เลือกแลก
+  // ทางที่ 2: มาจากลิงก์ดูของรางวัล
   if (parsedState.action === 'view_rewards') {
-    const { data: rewards } = await supabase
-      .from('rewards')
-      .select('id, name, points_cost')
-      .eq('active', true)
-      .order('points_cost', { ascending: true });
+    const [tierScore, spendableBalance, rewardsRes] = await Promise.all([
+      getTierScoreForEvaluation(member.id, member.created_at),
+      getSpendableBalance(member.id),
+      supabase.from('rewards').select('id, name, points_cost').eq('active', true).order('points_cost', { ascending: true }),
+    ]);
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(renderRewardsPage(member, rewards || []));
+    res.status(200).send(renderRewardsPage(member, rewardsRes.data || [], tierScore, spendableBalance));
     return;
   }
 
-  // ทางที่ 4: มาจากการกดแลกของรางวัล — เช็คแต้มแล้วหัก ถ้าพอ
+  // ทางที่ 3: มาจากการกดแลกของรางวัล
   if (parsedState.action === 'redeem') {
     const { data: reward } = await supabase
       .from('rewards')
@@ -119,14 +166,15 @@ export default async function handler(req, res) {
       return;
     }
 
-    if (member.points_balance < reward.points_cost) {
+    const spendableBalance = await getSpendableBalance(member.id);
+
+    if (spendableBalance < reward.points_cost) {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.status(200).send(renderErrorPage('แต้มไม่พอ', `ต้องใช้ ${reward.points_cost} แต้ม แต่คุณมี ${member.points_balance} แต้ม`));
+      res.status(200).send(renderErrorPage('แต้มไม่พอ', `ต้องใช้ ${reward.points_cost} แต้ม แต่คุณมี ${spendableBalance} แต้ม`));
       return;
     }
 
     const redemptionCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const newBalance = member.points_balance - reward.points_cost;
 
     const { error: redemptionError } = await supabase.from('redemptions').insert({
       member_id: member.id,
@@ -140,23 +188,15 @@ export default async function handler(req, res) {
       return;
     }
 
-    await supabase.from('points_ledger').insert({
-      member_id: member.id,
-      creative_id: null,
-      points: -reward.points_cost,
-      reason: `redeem_reward:${reward.id}`,
-    });
-    await supabase.from('members').update({ points_balance: newBalance }).eq('id', member.id);
-
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(renderRedeemSuccessPage(reward, redemptionCode, newBalance));
+    res.status(200).send(renderRedeemSuccessPage(reward, redemptionCode, spendableBalance - reward.points_cost));
     return;
   }
 
-  // ทางที่ 2: มาจากการสแกน QR — บวกแต้ม แล้ว redirect ไปโปรโมชั่นจริง
+  // ทางที่ 4 (ค่าเริ่มต้น): มาจากการสแกน QR — ให้ Tier Score + Point แล้ว redirect ไปโปรโมชั่นจริง
   const { creative, destination } = parsedState;
 
-  // เช็คก่อนว่าคนนี้เคยได้แต้มจาก creative นี้ไปแล้วหรือยัง (ให้แต้มแค่ครั้งแรกครั้งเดียว)
+  // เช็คก่อนว่า campaign นี้เคยให้ engagement กับคนนี้ไปแล้วหรือยัง (ให้ได้แค่ครั้งแรกครั้งเดียว)
   const { data: existingAward } = await supabase
     .from('points_ledger')
     .select('id')
@@ -164,52 +204,105 @@ export default async function handler(req, res) {
     .eq('creative_id', creative)
     .maybeSingle();
 
-  let newBalance = member.points_balance;
   let alreadyClaimed = false;
 
   if (existingAward) {
-    // เคยได้แต้มจาก QR อันนี้ไปแล้ว ไม่บวกซ้ำ ใช้ยอดเดิม
     alreadyClaimed = true;
   } else {
     const { error: ledgerError } = await supabase.from('points_ledger').insert({
       member_id: member.id,
       creative_id: creative,
-      points: POINTS_PER_SCAN,
+      tier_score: TIER_SCORE_PER_ENGAGEMENT,
+      reward_points: REWARD_POINTS_PER_ENGAGEMENT,
       reason: 'scan_qr',
     });
-
     if (ledgerError) {
-      // เผื่อกรณี race condition (สแกนพร้อมกัน 2 ครั้งในเสี้ยววินาที) — unique constraint กันซ้ำอีกชั้น
+      // เผื่อ race condition (สแกนพร้อมกัน 2 ครั้งในเสี้ยววินาที) — unique constraint กันซ้ำอีกชั้น
       alreadyClaimed = true;
-    } else {
-      newBalance = member.points_balance + POINTS_PER_SCAN;
-      await supabase
-        .from('members')
-        .update({
-          points_balance: newBalance,
-          lifetime_points: member.lifetime_points + POINTS_PER_SCAN, // Tier คำนวณจากตัวนี้ ไม่ลดตอนแลกของรางวัล
-        })
-        .eq('id', member.id);
     }
   }
 
+  const spendableBalance = await getSpendableBalance(member.id);
   const finalUrl = new URL(destination);
-  finalUrl.searchParams.set('points', newBalance);
+  finalUrl.searchParams.set('points', spendableBalance);
   if (alreadyClaimed) finalUrl.searchParams.set('already_claimed', '1');
   res.writeHead(302, { Location: finalUrl.toString() });
   res.end();
 }
 
-function renderRewardsPage(member, rewards) {
-  const { current } = getTier(member.lifetime_points);
+function renderPointsPage(member, history, tierScore, spendableBalance) {
+  const { current, next, pointsToNext } = getTier(tierScore);
+  const rows = history
+    .map((h) => {
+      const isRedeem = h.reason !== 'scan_qr';
+      return `
+        <tr>
+          <td>${new Date(h.created_at).toLocaleString('th-TH')}</td>
+          <td>${h.creative_id || '-'}</td>
+          <td style="text-align:right; color:${isRedeem ? '#9ca3af' : '#1baf7a'};">${isRedeem ? '-' : '+' + h.reward_points}</td>
+        </tr>`;
+    })
+    .join('');
+
+  return `<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>แต้มของฉัน</title>
+<style>
+  body { font-family: sans-serif; background: #f7f8fa; margin: 0; padding: 24px; color: #1b1f27; }
+  .card { background: white; border-radius: 16px; padding: 24px; max-width: 480px; margin: 0 auto; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+  .tier-badge { display: inline-block; color: white; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 999px; margin-top: 8px; letter-spacing: 0.5px; }
+  .balance-row { display: flex; gap: 16px; margin: 16px 0; }
+  .balance-box { flex: 1; background: #f7f8fa; border-radius: 10px; padding: 12px; }
+  .balance-box .label { font-size: 12px; color: #6b7280; margin: 0 0 2px; }
+  .balance-box .value { font-size: 24px; font-weight: 700; margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+  th { text-align: left; color: #6b7280; font-weight: 500; padding: 6px 4px; border-bottom: 1px solid #e5e7eb; }
+  td { padding: 8px 4px; border-bottom: 1px solid #f0f0f0; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <p style="color:#6b7280; margin:0;">${member.display_name ? member.display_name : 'สมาชิก'}</p>
+    <span class="tier-badge" style="background:${current.color};">${current.name}</span>
+    <div class="balance-row">
+      <div class="balance-box">
+        <p class="label">Point คงเหลือ (ใช้แลกได้)</p>
+        <p class="value" style="color:#06c755;">${spendableBalance.toLocaleString()}</p>
+      </div>
+      <div class="balance-box">
+        <p class="label">Tier Score</p>
+        <p class="value">${tierScore.toLocaleString()}</p>
+      </div>
+    </div>
+    ${
+      next
+        ? `<p style="color:#6b7280; font-size:13px;">อีก ${pointsToNext.toLocaleString()} Tier Score จะขึ้นระดับ ${next.name}</p>`
+        : `<p style="color:#6b7280; font-size:13px;">คุณอยู่ระดับสูงสุดแล้ว</p>`
+    }
+    <p style="color:#9ca3af; font-size:12px;">Point จะหมดอายุทุกสิ้นปีถ้าไม่ใช้ ส่วน Tier ประเมินใหม่ทุกปีจากยอดปีที่แล้ว</p>
+    <h3 style="margin-top:20px;">ประวัติล่าสุด</h3>
+    <table>
+      <tr><th>วันที่</th><th>ที่มา</th><th style="text-align:right;">Point</th></tr>
+      ${rows || '<tr><td colspan="3" style="color:#6b7280;">ยังไม่มีประวัติ</td></tr>'}
+    </table>
+  </div>
+</body>
+</html>`;
+}
+
+function renderRewardsPage(member, rewards, tierScore, spendableBalance) {
+  const { current } = getTier(tierScore);
   const items = rewards
     .map((r) => {
-      const canAfford = member.points_balance >= r.points_cost;
+      const canAfford = spendableBalance >= r.points_cost;
       return `
         <div class="reward ${canAfford ? '' : 'disabled'}">
           <div>
             <div class="reward-name">${r.name}</div>
-            <div class="reward-cost">${r.points_cost} แต้ม</div>
+            <div class="reward-cost">${r.points_cost} Point</div>
           </div>
           ${
             canAfford
@@ -229,8 +322,8 @@ function renderRewardsPage(member, rewards) {
 <style>
   body { font-family: sans-serif; background: #f7f8fa; margin: 0; padding: 24px; color: #1b1f27; }
   .card { background: white; border-radius: 16px; padding: 24px; max-width: 480px; margin: 0 auto; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
-  .balance { font-size: 28px; font-weight: 700; color: #06c755; margin: 8px 0 20px; }
   .tier-badge { display: inline-block; color: white; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 999px; margin-top: 8px; letter-spacing: 0.5px; }
+  .balance { font-size: 28px; font-weight: 700; color: #06c755; margin: 12px 0 20px; }
   .reward { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #f0f0f0; }
   .reward.disabled { opacity: 0.5; }
   .reward-name { font-weight: 600; }
@@ -241,9 +334,9 @@ function renderRewardsPage(member, rewards) {
 </head>
 <body>
   <div class="card">
-    <p style="color:#6b7280; margin:0;">แต้มของฉัน</p>
+    <p style="color:#6b7280; margin:0;">Point ของฉัน</p>
     <span class="tier-badge" style="background:${current.color};">${current.name}</span>
-    <p class="balance">${member.points_balance.toLocaleString()} แต้ม</p>
+    <p class="balance">${spendableBalance.toLocaleString()} Point</p>
     ${items || '<p style="color:#6b7280;">ยังไม่มีของรางวัลตอนนี้</p>'}
   </div>
 </body>
@@ -269,7 +362,7 @@ function renderRedeemSuccessPage(reward, code, newBalance) {
     <p>แลก <strong>${reward.name}</strong> สำเร็จ</p>
     <p class="code">${code}</p>
     <p class="hint">โชว์โค้ดนี้ให้พนักงานหน้าร้าน เพื่อรับของรางวัล</p>
-    <p class="hint">แต้มคงเหลือ: ${newBalance.toLocaleString()} แต้ม</p>
+    <p class="hint">Point คงเหลือ: ${newBalance.toLocaleString()}</p>
   </div>
 </body>
 </html>`;
@@ -291,55 +384,6 @@ function renderErrorPage(title, message) {
   <div class="card">
     <p style="font-size:18px; font-weight:700;">${title}</p>
     <p style="color:#6b7280;">${message}</p>
-  </div>
-</body>
-</html>`;
-}
-
-function renderPointsPage(member, history) {
-  const { current, next, pointsToNext } = getTier(member.lifetime_points);
-  const rows = history
-    .map(
-      (h) => `
-        <tr>
-          <td>${new Date(h.created_at).toLocaleString('th-TH')}</td>
-          <td>${h.creative_id || '-'}</td>
-          <td style="text-align:right; color:#1baf7a;">+${h.points}</td>
-        </tr>`
-    )
-    .join('');
-
-  return `<!DOCTYPE html>
-<html lang="th">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>แต้มสะสมของฉัน</title>
-<style>
-  body { font-family: sans-serif; background: #f7f8fa; margin: 0; padding: 24px; color: #1b1f27; }
-  .card { background: white; border-radius: 16px; padding: 24px; max-width: 480px; margin: 0 auto; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
-  .balance { font-size: 40px; font-weight: 700; color: #06c755; margin: 8px 0; }
-  .tier-badge { display: inline-block; color: white; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 999px; margin-top: 8px; letter-spacing: 0.5px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
-  th { text-align: left; color: #6b7280; font-weight: 500; padding: 6px 4px; border-bottom: 1px solid #e5e7eb; }
-  td { padding: 8px 4px; border-bottom: 1px solid #f0f0f0; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <p style="color:#6b7280; margin:0;">แต้มสะสมของฉัน${member.display_name ? ` — ${member.display_name}` : ''}</p>
-    <span class="tier-badge" style="background:${current.color};">${current.name}</span>
-    <p class="balance">${member.points_balance.toLocaleString()} แต้ม</p>
-    ${
-      next
-        ? `<p style="color:#6b7280; font-size:13px; margin-top:-8px;">อีก ${pointsToNext.toLocaleString()} แต้มสะสม จะขึ้นระดับ ${next.name}</p>`
-        : `<p style="color:#6b7280; font-size:13px; margin-top:-8px;">คุณอยู่ระดับสูงสุดแล้ว</p>`
-    }
-    <h3 style="margin-top:24px;">ประวัติล่าสุด</h3>
-    <table>
-      <tr><th>วันที่</th><th>ที่มา</th><th style="text-align:right;">แต้ม</th></tr>
-      ${rows || '<tr><td colspan="3" style="color:#6b7280;">ยังไม่มีประวัติ</td></tr>'}
-    </table>
   </div>
 </body>
 </html>`;
