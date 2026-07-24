@@ -23,13 +23,13 @@ const TIER_SCORE_PER_ENGAGEMENT = 1; // ปรับได้ แต่ปกต
 const REWARD_POINTS_PER_ENGAGEMENT = 5; // ปรับจำนวนแต้มต่อ engagement ได้ตรงนี้
 
 // หา Tier Score ในช่วงเวลาที่ใช้ตัดสิน Tier (ปีที่แล้วทั้งปี หรือปีนี้ถ้าเป็นสมาชิกใหม่)
+// นับทั้งจาก engagement (scan_qr) และรายการที่แอดมินปรับด้วยมือ (admin_adjust)
 async function getTierScoreForEvaluation(memberId, createdAt) {
   const { start, end } = getTierEvaluationPeriod(createdAt);
   let query = supabase
     .from('points_ledger')
     .select('tier_score')
     .eq('member_id', memberId)
-    .eq('reason', 'scan_qr')
     .gte('created_at', start);
   if (end) query = query.lt('created_at', end);
   const { data } = await query;
@@ -37,6 +37,7 @@ async function getTierScoreForEvaluation(memberId, createdAt) {
 }
 
 // หา Point คงเหลือที่ใช้แลกได้ (ได้ปีนี้ - ใช้ไปปีนี้) หมดอายุทุกสิ้นปี
+// นับทั้งจาก engagement (scan_qr) และรายการที่แอดมินปรับด้วยมือ (admin_adjust)
 async function getSpendableBalance(memberId) {
   const yearStart = getCurrentYearStart();
   const [earnedRes, spentRes] = await Promise.all([
@@ -44,7 +45,6 @@ async function getSpendableBalance(memberId) {
       .from('points_ledger')
       .select('reward_points')
       .eq('member_id', memberId)
-      .eq('reason', 'scan_qr')
       .gte('created_at', yearStart),
     supabase
       .from('redemptions')

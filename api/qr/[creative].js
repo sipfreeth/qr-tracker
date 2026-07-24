@@ -17,15 +17,20 @@ export default async function handler(req, res) {
   const screenId = req.query.screen || null; // เผื่ออยากส่ง ?screen=LOBBY-A-01 มาด้วย
 
   // ดึงปลายทางจากตาราง creatives แทนการเขียนตายตัวในโค้ด
-  // แก้/เพิ่ม creative ใหม่ได้จากหน้า Table Editor โดยไม่ต้อง deploy ใหม่
+  // แก้/เพิ่ม creative ใหม่ได้จากหน้า Table Editor หรือหน้า Admin โดยไม่ต้อง deploy ใหม่
   const { data, error } = await supabase
     .from('creatives')
-    .select('destination_url')
+    .select('destination_url, active')
     .eq('creative_id', creative)
     .single();
 
   if (error || !data) {
     res.status(404).send('ไม่พบ creative นี้');
+    return;
+  }
+
+  if (data.active === false) {
+    res.status(200).send('แคมเปญนี้ปิดใช้งานอยู่ในขณะนี้');
     return;
   }
 
