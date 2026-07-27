@@ -111,28 +111,37 @@ async function renderDashboardTab(filterCampaign) {
           <td style="text-align:right;">${r.points_spent}</td>
         <td style="text-align:center;">
   ${
-    r.status === 'used'
-      ? `<span class="badge-used">ใช้แล้ว</span>`
-      : `<span class="badge-pending">รอใช้</span>`
+    isPending
+      ? `<form method="POST" action="/api/admin/action" style="display:inline;">
+           <input type="hidden" name="action" value="mark_used" />
+           <input type="hidden" name="code" value="${r.redemption_code}" />
+           <button class="btn-small">ยืนยันใช้แล้ว</button>
+         </form>`
+      : `<span class="badge-used">ใช้แล้ว</span>`
   }
 </td>
-
 <td style="text-align:center;">
-  ${
-    r.shipping_status === 'pending'
-      ? `<form method="POST" action="/api/admin/action">
-          <input type="hidden" name="action" value="shipping_status">
-          <input type="hidden" name="redemption_id" value="${r.id}">
-          <input type="hidden" name="shipping_status" value="shipped">
-          <button class="btn-small">
-            จัดส่งแล้ว
-          </button>
-        </form>`
-      :
-      `<span class="badge-used">
-        ส่งแล้ว
-       </span>`
-  }
+${
+  r.shipping_status === 'shipped'
+  ?
+  `<form method="POST" action="/api/admin/action">
+      <input type="hidden" name="action" value="shipping_status">
+      <input type="hidden" name="redemption_id" value="${r.id}">
+      <input type="hidden" name="shipping_status" value="pending">
+      <button class="btn-small">
+        เปลี่ยนเป็นยังไม่ส่ง
+      </button>
+   </form>`
+  :
+  `<form method="POST" action="/api/admin/action">
+      <input type="hidden" name="action" value="shipping_status">
+      <input type="hidden" name="redemption_id" value="${r.id}">
+      <input type="hidden" name="shipping_status" value="shipped">
+      <button class="btn-small">
+        จัดส่งแล้ว
+      </button>
+   </form>`
+}
 </td>
         </tr>`;
     })
