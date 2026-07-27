@@ -175,25 +175,6 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 6. MARK USED ACTION (ยืนยันใช้สิทธิ์ Redemption)
-  if (action === 'mark_used') {
-    const code = params.get('code');
-    if (!code) {
-      res.status(400).send('ไม่พบโค้ด');
-      return;
-    }
-
-    await supabase
-      .from('redemptions')
-      .update({ status: 'used', used_at: new Date().toISOString() })
-      .eq('redemption_code', code)
-      .eq('status', 'pending');
-
-    res.writeHead(302, { Location: '/api/admin/dashboard' });
-    res.end();
-    return;
-  }
-
   // 7. ADMIN USER ACTIONS (admin_create, admin_update_role, admin_reset_password, admin_delete)
   if (action.startsWith('admin_')) {
     if (!requirePermission(res, admin.role, 'manage_admins')) return;
