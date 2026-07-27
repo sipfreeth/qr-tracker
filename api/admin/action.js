@@ -175,13 +175,34 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 6. MARK USED ACTION (ยืนยันใช้สิทธิ์ Redemption)
-  if (action === 'mark_used') {
-    const code = params.get('code');
-    if (!code) {
-      res.status(400).send('ไม่พบโค้ด');
-      return;
-    }
+  // 6. SHIPPING STATUS
+if (action === 'shipping_status') {
+  const redemptionId = params.get('redemption_id');
+  const shippingStatus = params.get('shipping_status');
+
+  if (!['pending', 'shipped'].includes(shippingStatus)) {
+    res.status(400).send('Invalid shipping status');
+    return;
+  }
+
+  await supabase
+    .from('reward_redemptions')
+    .update({
+      shipping_status: shippingStatus,
+      shipped_at:
+        shippingStatus === 'shipped'
+          ? new Date().toISOString()
+          : null,
+    })
+    .eq('id', redemptionId);
+
+  res.writeHead(302, {
+    Location: '/api/admin/rewards',
+  });
+
+  res.end();
+  return;
+}
 
     await supabase
       .from('redemptions')
