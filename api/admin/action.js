@@ -176,23 +176,67 @@ export default async function handler(req, res) {
   }
 
   // 6. MARK USED ACTION (ยืนยันใช้สิทธิ์ Redemption)
-  if (action === 'mark_used') {
-    const code = params.get('code');
-    if (!code) {
-      res.status(400).send('ไม่พบโค้ด');
-      return;
-    }
+ if (action === 'mark_used') {
+  const code = params.get('code');
 
-    await supabase
-      .from('redemptions')
-      .update({ status: 'used', used_at: new Date().toISOString() })
-      .eq('redemption_code', code)
-      .eq('status', 'pending');
+  const receiverName = params.get('receiver_name');
+  const receiverPhone = params.get('receiver_phone');
+  const shippingAddress = params.get('shipping_address');
 
-    res.writeHead(302, { Location: '/api/admin/dashboard' });
-    res.end();
+
+  if (!code) {
+    res.status(400).send('ไม่พบโค้ด');
     return;
   }
+
+
+  // หา redemption ก่อน
+  const { data: redemption } = await supabase
+    .from('redemptions')
+    .select('member_id')
+    .eq('redemption_code', code)
+    .single();
+
+
+  if (!redemption) {
+    res.status(404).send('ไม่พบข้อมูล');
+    return;
+  }
+
+
+  // เปลี่ยน Reward เป็นใช้แล้วทันที
+  await supabase
+    .from('redemptions')
+    .update({
+      status: 'used',
+      used_at: new Date().toISOString(),
+      receiver_name: receiverName,
+      receiver_phone: receiverPhone,
+      shipping_address: shippingAddress,
+      shipping_status:'pending'
+    })
+    .eq('redemption_code', code);
+
+
+
+  // เก็บ address เข้า member
+  await supabase
+    .from('member_addresses')
+    .insert({
+      member_id:redemption.member_id,
+      name:receiverName,
+      phone:receiverPhone,
+      address:shippingAddress
+    });
+
+
+  res.writeHead(302,{
+    Location:'/reward/success'
+  });
+
+  res.end();
+  return;
+}
 
   // 7. ADMIN USER ACTIONS (admin_create, admin_update_role, admin_reset_password, admin_delete)
   if (action.startsWith('admin_')) {
@@ -228,6 +272,35 @@ export default async function handler(req, res) {
     res.end();
     return;
   }
+
+  // SHIPPING STATUS
+if (action === 'shipping_status') {
+  const redemptionId = params.get('redemption_id');
+  const shippingStatus = params.get('shipping_status');
+
+  if (!['pending','shipping','delivered'].includes(shippingStatus)) {
+    res.status(400).send('Invalid shipping status');
+    return;
+  }
+
+  await supabase
+    .from('reward_redemptions')
+    .update({
+      shipping_status: shippingStatus,
+      shipped_at:
+        shippingStatus === 'pending'
+          ? new Date().toISOString()
+          : null,
+    })
+    .eq('id', redemptionId);
+
+  res.writeHead(302, {
+    Location: '/api/admin/rewards',
+  });
+
+  res.end();
+  return;
+}
 
   res.status(400).send('ไม่รู้จัก action นี้');
 }
