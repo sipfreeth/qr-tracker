@@ -119,30 +119,6 @@ async function renderDashboardTab(filterCampaign) {
          </form>`
       : `<span class="badge-used">ใช้แล้ว</span>`
   }
-</td>
-<td style="text-align:center;">
-${
-  r.shipping_status === 'shipped'
-  ?
-  `<form method="POST" action="/api/admin/action">
-      <input type="hidden" name="action" value="shipping_status">
-      <input type="hidden" name="redemption_id" value="${r.id}">
-      <input type="hidden" name="shipping_status" value="pending">
-      <button class="btn-small">
-        เปลี่ยนเป็นยังไม่ส่ง
-      </button>
-   </form>`
-  :
-  `<form method="POST" action="/api/admin/action">
-      <input type="hidden" name="action" value="shipping_status">
-      <input type="hidden" name="redemption_id" value="${r.id}">
-      <input type="hidden" name="shipping_status" value="shipped">
-      <button class="btn-small">
-        จัดส่งแล้ว
-      </button>
-   </form>`
-}
-</td>
         </tr>`;
     })
     .join('');
