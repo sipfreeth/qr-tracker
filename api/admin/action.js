@@ -2,7 +2,39 @@
 //
 // ศูนย์รวม Action ทั้งหมดของระบบ Admin บน Vercel Serverless Function
 // ช่วยประหยัดจำนวน Serverless Functions ไม่ให้เกินโควต้า 12 Functions บน Hobby Plan
+// UPDATE MEMBER SHIPPING STATUS
+if (action === 'update_member_shipping') {
 
+  const redemptionId = params.get('redemption_id');
+  const shippingStatus = params.get('shipping_status');
+  const memberId = params.get('member_id');
+
+
+  if (!['pending','shipped'].includes(shippingStatus)) {
+    res.status(400).send('Invalid shipping status');
+    return;
+  }
+
+
+  await supabase
+    .from('redemptions')
+    .update({
+      shipping_status: shippingStatus,
+      shipped_at:
+        shippingStatus === 'shipped'
+        ? new Date().toISOString()
+        : null
+    })
+    .eq('id', redemptionId);
+
+
+  res.writeHead(302,{
+    Location:`/api/admin/members?detail=${memberId}`
+  });
+
+  res.end();
+  return;
+}
 import bcrypt from 'bcryptjs';
 import { supabase } from '../../lib/supabaseClient.js';
 import { requireAdmin, requirePermission, createSessionCookie, clearSessionCookie } from '../../lib/adminAuth.js';
@@ -301,7 +333,40 @@ if (action === 'shipping_status') {
   res.end();
   return;
 }
+// UPDATE MEMBER SHIPPING STATUS
+if (action === 'update_member_shipping') {
 
+  const redemptionId = params.get('redemption_id');
+  const shippingStatus = params.get('shipping_status');
+  const memberId = params.get('member_id');
+
+
+  if (!['pending','shipped'].includes(shippingStatus)) {
+    res.status(400).send('Invalid shipping status');
+    return;
+  }
+
+
+  await supabase
+    .from('redemptions')
+    .update({
+      shipping_status: shippingStatus,
+      shipped_at:
+        shippingStatus === 'shipped'
+        ? new Date().toISOString()
+        : null
+    })
+    .eq('id', redemptionId);
+
+
+  res.writeHead(302,{
+    Location:`/api/admin/members?detail=${memberId}`
+  });
+
+  res.end();
+  return;
+}
+  
   res.status(400).send('ไม่รู้จัก action นี้');
 }
 
