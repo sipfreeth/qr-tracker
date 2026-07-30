@@ -8,7 +8,7 @@
 //   POST /api/admin/action?action=login           — ประมวลผล login
 //   GET  /api/admin/action?action=logout          — logout
 //   POST /api/admin/action?action=mark_used       — ยืนยัน redemption ว่าใช้แล้ว (สำหรับรายการ pending เก่า)
-//   POST /api/admin/action?action=redemption_ship_toggle — สลับสถานะจัดส่งแล้ว/ยังไม่จัดส่ง
+//   POST /api/admin/action?action=redemption_ship_status — ตั้งสถานะจัดส่ง (เลือกจาก dropdown)
 //   POST /api/admin/action?action=reward_create   — เพิ่มของรางวัล
 //   POST /api/admin/action?action=reward_update   — แก้ของรางวัล
 //   POST /api/admin/action?action=reward_toggle   — เปิด/ปิดของรางวัล
@@ -107,11 +107,10 @@ export default async function handler(req, res) {
   }
 
   // ---------- 3b. TOGGLE SHIPPING STATUS (จัดส่งแล้ว / ยังไม่จัดส่ง) ----------
-  if (actionParam === 'redemption_ship_toggle') {
+  if (actionParam === 'redemption_ship_status') {
     const redemptionId = params.get('redemption_id');
-    const { data: r } = await supabase.from('redemptions').select('shipping_status').eq('id', redemptionId).single();
-    if (r) {
-      const newStatus = r.shipping_status === 'shipped' ? 'not_shipped' : 'shipped';
+    const newStatus = params.get('shipping_status');
+    if (redemptionId && ['shipped', 'not_shipped'].includes(newStatus)) {
       await supabase.from('redemptions').update({ shipping_status: newStatus }).eq('id', redemptionId);
     }
     const backTo = params.get('back_to') || '/api/admin/dashboard';

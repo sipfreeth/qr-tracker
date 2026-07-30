@@ -134,9 +134,12 @@ async function renderDashboardTab(filterCampaign) {
         : '<span class="muted">-</span>';
       const shipToggle =
         r.status === 'used'
-          ? `<form method="POST" action="/api/admin/action?action=redemption_ship_toggle" style="display:inline;">
+          ? `<form method="POST" action="/api/admin/action?action=redemption_ship_status" style="display:inline;">
                <input type="hidden" name="redemption_id" value="${r.id}" />
-               <button class="btn-small ${r.shipping_status === 'shipped' ? '' : 'btn-muted'}">${r.shipping_status === 'shipped' ? 'จัดส่งแล้ว' : 'ยังไม่จัดส่ง'}</button>
+               <select name="shipping_status" class="table-input" style="width:auto; display:inline-block;" onchange="this.form.submit()">
+                 <option value="not_shipped" ${r.shipping_status !== 'shipped' ? 'selected' : ''}>ยังไม่จัดส่ง</option>
+                 <option value="shipped" ${r.shipping_status === 'shipped' ? 'selected' : ''}>จัดส่งแล้ว</option>
+               </select>
              </form>`
           : '-';
       return `
@@ -331,10 +334,13 @@ async function renderMemberDetail(admin, memberId) {
     .map((r) => {
       const shipBadge =
         r.status === 'used'
-          ? `<form method="POST" action="/api/admin/action?action=redemption_ship_toggle" style="display:inline;">
+          ? `<form method="POST" action="/api/admin/action?action=redemption_ship_status" style="display:inline;">
                <input type="hidden" name="redemption_id" value="${r.id}" />
                <input type="hidden" name="back_to" value="/api/admin/members?detail=${memberId}" />
-               <button class="btn-small ${r.shipping_status === 'shipped' ? '' : 'btn-muted'}">${r.shipping_status === 'shipped' ? 'จัดส่งแล้ว' : 'ยังไม่จัดส่ง'}</button>
+               <select name="shipping_status" class="table-input" style="width:auto; display:inline-block;" onchange="this.form.submit()">
+                 <option value="not_shipped" ${r.shipping_status !== 'shipped' ? 'selected' : ''}>ยังไม่จัดส่ง</option>
+                 <option value="shipped" ${r.shipping_status === 'shipped' ? 'selected' : ''}>จัดส่งแล้ว</option>
+               </select>
              </form>`
           : 'รอใช้';
       return `
