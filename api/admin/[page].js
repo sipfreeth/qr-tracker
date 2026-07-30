@@ -26,7 +26,7 @@ export default async function handler(req, res) {
   if (page === 'dashboard') content = await renderDashboardTab(req.query.filter_campaign || null);
   if (page === 'members') content = await renderMembersTab(admin, req.query.tier || null, req.query.detail || null);
   if (page === 'rewards') content = await renderRewardsTab(admin);
-  if (page === 'campaigns') content = await renderCampaignsTab(admin);
+  if (page === 'campaigns') content = await renderCampaignsTab(admin, req);
   if (page === 'admins') content = await renderAdminsTab(admin);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -40,7 +40,7 @@ async function renderDashboardTab(filterCampaign) {
     supabase.from('members').select('id'),
     supabase
       .from('redemptions')
-      .select('id, redemption_code, points_spent, status, created_at, rewards(name), members(display_name, line_user_id)')
+      .select('id, redemption_code, points_spent, status, shipping_status, created_at, recipient_name, recipient_phone, recipient_address, rewards(name), members(display_name, line_user_id)')
       .order('created_at', { ascending: false })
       .limit(50),
     supabase.from('creatives').select('creative_id').order('creative_id'),
@@ -51,15 +51,33 @@ async function renderDashboardTab(filterCampaign) {
   const redemptions = redemptionsRes.data || [];
   const creativeIds = (creativesRes.data || []).map((c) => c.creative_id);
 
-  const scansByCreative = {};
-  const today = new Date().toDateString();
-  let scansToday = 0;
+  // ขอบเขตช่วงเวลา: วันนี้ (เที่ยงคืน), สัปดาห์นี้ (จันทร์), เดือนนี้ (วันที่ 1)
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayOfWeek = (now.getDay() + 6) % 7; // จันทร์ = 0
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(todayStart.getDate() - dayOfWeek);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // สรุปยอดสแกนแยกตาม creative x ช่วงเวลา (วันนี้/สัปดาห์นี้/เดือนนี้/ทั้งหมด — เป็นยอดสะสม ไม่ใช่แยกกันเป๊ะๆ)
+  const statsByCreative = {};
+  for (const id of creativeIds) statsByCreative[id] = { today: 0, week: 0, month: 0, all: 0 };
   for (const row of scanLogs) {
-    scansByCreative[row.creative_id] = (scansByCreative[row.creative_id] || 0) + 1;
-    if (new Date(row.scanned_at).toDateString() === today) scansToday++;
+    if (!statsByCreative[row.creative_id]) statsByCreative[row.creative_id] = { today: 0, week: 0, month: 0, all: 0 };
+    const s = statsByCreative[row.creative_id];
+    const scannedAt = new Date(row.scanned_at);
+    s.all++;
+    if (scannedAt >= monthStart) s.month++;
+    if (scannedAt >= weekStart) s.week++;
+    if (scannedAt >= todayStart) s.today++;
   }
+  const scansToday = Object.values(statsByCreative).reduce((sum, s) => sum + s.today, 0);
+
+  const scansByCreative = {};
+  for (const row of scanLogs) scansByCreative[row.creative_id] = (scansByCreative[row.creative_id] || 0) + 1;
 
   const pendingCount = redemptions.filter((r) => r.status === 'pending').length;
+  const notShippedCount = redemptions.filter((r) => r.status === 'used' && r.shipping_status === 'not_shipped').length;
 
   const chartLabels = Object.keys(scansByCreative);
   const chartValues = Object.values(scansByCreative);
@@ -94,31 +112,50 @@ async function renderDashboardTab(filterCampaign) {
     .map((id) => `<option value="${id}" ${filterCampaign === id ? 'selected' : ''}>${id}</option>`)
     .join('');
 
-  const creativeRows = Object.entries(scansByCreative)
-    .sort((a, b) => b[1] - a[1])
-    .map(([id, count]) => `<tr><td>${id}</td><td style="text-align:right;">${count}</td></tr>`)
+  const periodRows = Object.entries(statsByCreative)
+    .sort((a, b) => b[1].all - a[1].all)
+    .map(
+      ([id, s]) => `
+        <tr>
+          <td>${id}</td>
+          <td style="text-align:right;">${s.today.toLocaleString()}</td>
+          <td style="text-align:right;">${s.week.toLocaleString()}</td>
+          <td style="text-align:right;">${s.month.toLocaleString()}</td>
+          <td style="text-align:right; font-weight:700;">${s.all.toLocaleString()}</td>
+        </tr>`
+    )
     .join('');
 
   const redemptionRows = redemptions
     .map((r) => {
       const isPending = r.status === 'pending';
+      const shippingInfo = r.recipient_name
+        ? `<div>${r.recipient_name}</div><div class="hint">${r.recipient_phone || ''}</div><div class="hint">${r.recipient_address || ''}</div>`
+        : '<span class="muted">-</span>';
+      const shipToggle =
+        r.status === 'used'
+          ? `<form method="POST" action="/api/admin/action?action=redemption_ship_toggle" style="display:inline;">
+               <input type="hidden" name="redemption_id" value="${r.id}" />
+               <button class="btn-small ${r.shipping_status === 'shipped' ? '' : 'btn-muted'}">${r.shipping_status === 'shipped' ? 'จัดส่งแล้ว' : 'ยังไม่จัดส่ง'}</button>
+             </form>`
+          : '-';
       return `
         <tr>
           <td>${new Date(r.created_at).toLocaleString('th-TH')}</td>
           <td>${r.members?.display_name || r.members?.line_user_id || '-'}</td>
           <td>${r.rewards?.name || '-'}</td>
-          <td style="text-align:center; font-family:monospace;">${r.redemption_code}</td>
           <td style="text-align:right;">${r.points_spent}</td>
-        <td style="text-align:center;">
-  ${
-    isPending
-      ? `<form method="POST" action="/api/admin/action" style="display:inline;">
-           <input type="hidden" name="action" value="mark_used" />
-           <input type="hidden" name="code" value="${r.redemption_code}" />
-           <button class="btn-small">ยืนยันใช้แล้ว</button>
-         </form>`
-      : `<span class="badge-used">ใช้แล้ว</span>`
-  }
+          <td style="max-width:200px;">${shippingInfo}</td>
+          <td style="text-align:center;">
+            ${
+              isPending
+                ? `<form method="POST" action="/api/admin/action?action=mark_used" style="display:inline;">
+                     <input type="hidden" name="code" value="${r.redemption_code}" />
+                     <button class="btn-small">ยืนยันใช้แล้ว</button>
+                   </form>`
+                : shipToggle
+            }
+          </td>
         </tr>`;
     })
     .join('');
@@ -128,7 +165,7 @@ async function renderDashboardTab(filterCampaign) {
       <div class="card"><p class="label">สแกนทั้งหมด</p><p class="value">${scanLogs.length.toLocaleString()}</p></div>
       <div class="card"><p class="label">สแกนวันนี้</p><p class="value">${scansToday.toLocaleString()}</p></div>
       <div class="card"><p class="label">สมาชิกทั้งหมด</p><p class="value">${totalMembers.toLocaleString()}</p></div>
-      <div class="card"><p class="label">รอยืนยัน Redemption</p><p class="value" style="color:${pendingCount > 0 ? '#e76f51' : '#1b1f27'};">${pendingCount}</p></div>
+      <div class="card"><p class="label">รอจัดส่ง</p><p class="value" style="color:${notShippedCount > 0 ? '#e76f51' : '#1b1f27'};">${notShippedCount}</p></div>
     </div>
 
     <div class="section">
@@ -147,17 +184,17 @@ async function renderDashboardTab(filterCampaign) {
     ${campaignDetailHtml}
 
     <div class="section">
-      <h2>ยอดสแกนแยกตาม Campaign (ตาราง)</h2>
+      <h2>ยอดสแกนแยกตาม Campaign — วันนี้ / สัปดาห์นี้ / เดือนนี้ / ทั้งหมด</h2>
       <table>
-        <tr><th>Creative</th><th style="text-align:right;">จำนวนสแกน</th></tr>
-        ${creativeRows || '<tr><td colspan="2" class="muted">ยังไม่มีข้อมูล</td></tr>'}
+        <tr><th>Campaign</th><th style="text-align:right;">วันนี้</th><th style="text-align:right;">สัปดาห์นี้</th><th style="text-align:right;">เดือนนี้</th><th style="text-align:right;">ทั้งหมด</th></tr>
+        ${periodRows || '<tr><td colspan="5" class="muted">ยังไม่มีข้อมูล</td></tr>'}
       </table>
     </div>
 
     <div class="section">
-      <h2>ประวัติการแลกของรางวัล (50 รายการล่าสุด)</h2>
+      <h2>ประวัติการแลกของรางวัล / สถานะจัดส่ง (50 รายการล่าสุด)</h2>
       <table>
-        <tr><th>วันที่</th><th>สมาชิก</th><th>ของรางวัล</th><th style="text-align:center;">โค้ด</th><th style="text-align:right;">Point</th><th style="text-align:center;">สถานะ</th></tr>
+        <tr><th>วันที่</th><th>สมาชิก</th><th>ของรางวัล</th><th style="text-align:right;">Point</th><th>ที่อยู่จัดส่ง</th><th style="text-align:center;">สถานะ</th></tr>
         ${redemptionRows || '<tr><td colspan="6" class="muted">ยังไม่มีการแลก</td></tr>'}
       </table>
     </div>
@@ -261,10 +298,11 @@ async function renderMembersTab(admin, tierFilter, detailMemberId) {
 
 // ---------- Member detail (ประวัติ engagement + redemption + form แก้ไข/ลบ) ----------
 async function renderMemberDetail(admin, memberId) {
-  const [memberRes, ledgerRes, redemptionsRes] = await Promise.all([
+  const [memberRes, ledgerRes, redemptionsRes, addressesRes] = await Promise.all([
     supabase.from('members').select('id, line_user_id, display_name, created_at').eq('id', memberId).single(),
     supabase.from('points_ledger').select('creative_id, tier_score, reward_points, reason, created_at').eq('member_id', memberId).order('created_at', { ascending: false }),
-    supabase.from('redemptions').select('redemption_code, points_spent, status, created_at, used_at, rewards(name)').eq('member_id', memberId).order('created_at', { ascending: false }),
+    supabase.from('redemptions').select('id, points_spent, status, shipping_status, created_at, used_at, recipient_name, recipient_phone, recipient_address, rewards(name)').eq('member_id', memberId).order('created_at', { ascending: false }),
+    supabase.from('member_addresses').select('recipient_name, recipient_phone, recipient_address, created_at').eq('member_id', memberId).order('created_at', { ascending: false }),
   ]);
 
   const member = memberRes.data;
@@ -272,6 +310,7 @@ async function renderMemberDetail(admin, memberId) {
 
   const ledger = ledgerRes.data || [];
   const redemptions = redemptionsRes.data || [];
+  const addresses = addressesRes.data || [];
   const tierScore = ledger.reduce((s, r) => s + r.tier_score, 0);
   const { current } = getTier(tierScore);
 
@@ -289,14 +328,34 @@ async function renderMemberDetail(admin, memberId) {
     .join('');
 
   const redemptionRows = redemptions
-    .map(
-      (r) => `
+    .map((r) => {
+      const shipBadge =
+        r.status === 'used'
+          ? `<form method="POST" action="/api/admin/action?action=redemption_ship_toggle" style="display:inline;">
+               <input type="hidden" name="redemption_id" value="${r.id}" />
+               <input type="hidden" name="back_to" value="/api/admin/members?detail=${memberId}" />
+               <button class="btn-small ${r.shipping_status === 'shipped' ? '' : 'btn-muted'}">${r.shipping_status === 'shipped' ? 'จัดส่งแล้ว' : 'ยังไม่จัดส่ง'}</button>
+             </form>`
+          : 'รอใช้';
+      return `
         <tr>
           <td>${new Date(r.created_at).toLocaleString('th-TH')}</td>
           <td>${r.rewards?.name || '-'}</td>
           <td style="text-align:right;">${r.points_spent}</td>
-          <td style="text-align:center; font-family:monospace;">${r.redemption_code}</td>
-          <td>${r.status === 'used' ? `ใช้แล้ว (${r.used_at ? new Date(r.used_at).toLocaleString('th-TH') : '-'})` : 'รอใช้'}</td>
+          <td>${r.recipient_name ? `${r.recipient_name}<br/><span class="hint">${r.recipient_phone || ''}</span><br/><span class="hint">${r.recipient_address || ''}</span>` : '-'}</td>
+          <td style="text-align:center;">${shipBadge}</td>
+        </tr>`;
+    })
+    .join('');
+
+  const addressRows = addresses
+    .map(
+      (a) => `
+        <tr>
+          <td>${new Date(a.created_at).toLocaleDateString('th-TH')}</td>
+          <td>${a.recipient_name}</td>
+          <td>${a.recipient_phone}</td>
+          <td>${a.recipient_address}</td>
         </tr>`
     )
     .join('');
@@ -308,8 +367,7 @@ async function renderMemberDetail(admin, memberId) {
     ? `
     <div class="section">
       <h2>ปรับ Tier Score / Point ด้วยมือ</h2>
-      <form method="POST" action="/api/admin/action" class="stack-form">
-        <input type="hidden" name="action" value="member_adjust" />
+      <form method="POST" action="/api/admin/action?action=member_adjust" class="stack-form">
         <input type="hidden" name="member_id" value="${member.id}" />
         <label>เพิ่ม/ลด Tier Score (ใส่ค่าติดลบเพื่อหัก)</label>
         <input type="number" name="tier_score_delta" value="0" />
@@ -327,8 +385,7 @@ async function renderMemberDetail(admin, memberId) {
     <div class="section">
       <h2 style="color:#e76f51;">ลบสมาชิกนี้</h2>
       <p class="hint">การลบไม่สามารถย้อนกลับได้ ประวัติทั้งหมดของสมาชิกคนนี้จะหายไป</p>
-      <form method="POST" action="/api/admin/action" onsubmit="return confirm('ยืนยันลบสมาชิกนี้ถาวร? ข้อมูลทั้งหมดจะกู้คืนไม่ได้')">
-        <input type="hidden" name="action" value="member_delete" />
+      <form method="POST" action="/api/admin/action?action=member_delete" onsubmit="return confirm('ยืนยันลบสมาชิกนี้ถาวร? ข้อมูลทั้งหมดจะกู้คืนไม่ได้')">
         <input type="hidden" name="member_id" value="${member.id}" />
         <label style="font-size:13px; display:flex; align-items:center; gap:6px; margin:8px 0;">
           <input type="checkbox" name="confirm" value="yes" required />
@@ -358,8 +415,16 @@ async function renderMemberDetail(admin, memberId) {
     <div class="section">
       <h2>ประวัติการแลก Reward</h2>
       <table>
-        <tr><th>วันที่</th><th>ของรางวัล</th><th style="text-align:right;">Point</th><th style="text-align:center;">โค้ด</th><th>สถานะ</th></tr>
+        <tr><th>วันที่</th><th>ของรางวัล</th><th style="text-align:right;">Point</th><th>ที่อยู่จัดส่ง</th><th style="text-align:center;">สถานะจัดส่ง</th></tr>
         ${redemptionRows || '<tr><td colspan="5" class="muted">ยังไม่เคยแลก</td></tr>'}
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>ที่อยู่ที่เคยใช้จัดส่ง</h2>
+      <table>
+        <tr><th>วันที่</th><th>ชื่อ</th><th>เบอร์โทร</th><th>ที่อยู่</th></tr>
+        ${addressRows || '<tr><td colspan="4" class="muted">ยังไม่มีที่อยู่บันทึกไว้</td></tr>'}
       </table>
     </div>
 
@@ -378,8 +443,7 @@ async function renderRewardsTab(admin) {
       const editableCells = canEdit
         ? `
           <td>
-            <form method="POST" action="/api/admin/action" class="inline-form">
-              <input type="hidden" name="action" value="reward_update" />
+            <form method="POST" action="/api/admin/action?action=reward_update" class="inline-form">
               <input type="hidden" name="id" value="${r.id}" />
               <input type="text" name="name" value="${r.name}" class="table-input" />
           </td>
@@ -389,8 +453,7 @@ async function renderRewardsTab(admin) {
 
       const deleteCell = canDelete
         ? `<td style="text-align:center;">
-            <form method="POST" action="/api/admin/action" onsubmit="return confirm('ลบของรางวัลนี้?')" style="display:inline;">
-              <input type="hidden" name="action" value="reward_delete" />
+            <form method="POST" action="/api/admin/action?action=reward_delete" onsubmit="return confirm('ลบของรางวัลนี้?')" style="display:inline;">
               <input type="hidden" name="id" value="${r.id}" />
               <button class="btn-small btn-danger">ลบ</button>
             </form>
@@ -401,8 +464,7 @@ async function renderRewardsTab(admin) {
         <tr>
           ${editableCells}
           <td style="text-align:center;">
-            <form method="POST" action="/api/admin/action" class="inline-form">
-              <input type="hidden" name="action" value="reward_toggle" />
+            <form method="POST" action="/api/admin/action?action=reward_toggle" class="inline-form">
               <input type="hidden" name="id" value="${r.id}" />
               <button class="btn-small ${r.active ? '' : 'btn-muted'}">${r.active ? 'เปิดใช้อยู่' : 'ปิดใช้อยู่'}</button>
             </form>
@@ -415,8 +477,7 @@ async function renderRewardsTab(admin) {
   return `
     <div class="section">
       <h2>เพิ่มของรางวัลใหม่</h2>
-      <form method="POST" action="/api/admin/action" class="stack-form">
-        <input type="hidden" name="action" value="reward_create" />
+      <form method="POST" action="/api/admin/action?action=reward_create" class="stack-form">
         <label>ชื่อของรางวัล</label>
         <input type="text" name="name" required />
         <label>ใช้กี่ Point</label>
@@ -435,18 +496,21 @@ async function renderRewardsTab(admin) {
 }
 
 // ---------- Campaigns tab ----------
-async function renderCampaignsTab(admin) {
+async function renderCampaignsTab(admin, req) {
   const { data: creatives } = await supabase.from('creatives').select('creative_id, destination_url, active').order('creative_id');
   const canEdit = can(admin.role, 'edit_campaign');
   const canDelete = can(admin.role, 'delete_campaign');
 
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const baseUrl = `${proto}://${req.headers.host}`;
+
   const rows = (creatives || [])
     .map((c) => {
+      const qrLink = `${baseUrl}/api/qr/${c.creative_id}`;
       const editableCells = canEdit
         ? `
           <td>
-            <form method="POST" action="/api/admin/action" class="inline-form">
-              <input type="hidden" name="action" value="campaign_update" />
+            <form method="POST" action="/api/admin/action?action=campaign_update" class="inline-form">
               <input type="hidden" name="creative_id" value="${c.creative_id}" />
               <input type="text" name="destination_url" value="${c.destination_url}" class="table-input" />
           </td>
@@ -455,8 +519,7 @@ async function renderCampaignsTab(admin) {
 
       const deleteCell = canDelete
         ? `<td style="text-align:center;">
-            <form method="POST" action="/api/admin/action" onsubmit="return confirm('ลบ Campaign นี้?')" style="display:inline;">
-              <input type="hidden" name="action" value="campaign_delete" />
+            <form method="POST" action="/api/admin/action?action=campaign_delete" onsubmit="return confirm('ลบ Campaign นี้?')" style="display:inline;">
               <input type="hidden" name="creative_id" value="${c.creative_id}" />
               <button class="btn-small btn-danger">ลบ</button>
             </form>
@@ -466,10 +529,15 @@ async function renderCampaignsTab(admin) {
       return `
         <tr>
           <td style="font-family:monospace;">${c.creative_id}</td>
+          <td>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <input type="text" readonly value="${qrLink}" class="table-input" style="font-size:12px;" onclick="this.select()" />
+              <button type="button" class="btn-small" onclick="navigator.clipboard.writeText('${qrLink}'); this.textContent='ก็อปแล้ว'; setTimeout(()=>this.textContent='ก็อปลิงก์', 1500);">ก็อปลิงก์</button>
+            </div>
+          </td>
           ${editableCells}
           <td style="text-align:center;">
-            <form method="POST" action="/api/admin/action" class="inline-form">
-              <input type="hidden" name="action" value="campaign_toggle" />
+            <form method="POST" action="/api/admin/action?action=campaign_toggle" class="inline-form">
               <input type="hidden" name="creative_id" value="${c.creative_id}" />
               <button class="btn-small ${c.active ? '' : 'btn-muted'}">${c.active ? 'เปิดใช้อยู่' : 'ปิดใช้อยู่'}</button>
             </form>
@@ -482,8 +550,7 @@ async function renderCampaignsTab(admin) {
   return `
     <div class="section">
       <h2>เพิ่ม Campaign ใหม่</h2>
-      <form method="POST" action="/api/admin/action" class="stack-form">
-        <input type="hidden" name="action" value="campaign_create" />
+      <form method="POST" action="/api/admin/action?action=campaign_create" class="stack-form">
         <label>Campaign ID (ใช้ในลิงก์ QR เช่น brandA-video)</label>
         <input type="text" name="creative_id" required pattern="[a-zA-Z0-9\\-_]+" />
         <label>URL ปลายทาง</label>
@@ -495,8 +562,8 @@ async function renderCampaignsTab(admin) {
       <h2>Campaign ทั้งหมด</h2>
       ${!canEdit ? '<p class="hint">คุณดูและเปิด/ปิดใช้งานได้ แต่แก้ไข/ลบไม่ได้</p>' : ''}
       <table>
-        <tr><th>Campaign ID</th><th>URL ปลายทาง</th><th></th><th style="text-align:center;">สถานะ</th><th></th></tr>
-        ${rows || '<tr><td colspan="5" class="muted">ยังไม่มี Campaign</td></tr>'}
+        <tr><th>Campaign ID</th><th>ลิงก์ QR</th><th>URL ปลายทาง</th><th></th><th style="text-align:center;">สถานะ</th><th></th></tr>
+        ${rows || '<tr><td colspan="6" class="muted">ยังไม่มี Campaign</td></tr>'}
       </table>
     </div>`;
 }
@@ -520,8 +587,7 @@ async function renderAdminsTab(admin) {
             ${
               isSelf
                 ? a.role
-                : `<form method="POST" action="/api/admin/action" class="inline-form">
-                     <input type="hidden" name="action" value="admin_update_role" />
+                : `<form method="POST" action="/api/admin/action?action=admin_update_role" class="inline-form">
                      <input type="hidden" name="username" value="${a.username}" />
                      <select name="role" class="table-input">${roleOptions(a.role)}</select>
                    </td>
@@ -533,8 +599,7 @@ async function renderAdminsTab(admin) {
             ${
               isSelf
                 ? ''
-                : `<form method="POST" action="/api/admin/action" onsubmit="return confirm('ลบบัญชี ${a.username}?')" style="display:inline;">
-                     <input type="hidden" name="action" value="admin_delete" />
+                : `<form method="POST" action="/api/admin/action?action=admin_delete" onsubmit="return confirm('ลบบัญชี ${a.username}?')" style="display:inline;">
                      <input type="hidden" name="username" value="${a.username}" />
                      <button class="btn-small btn-danger">ลบ</button>
                    </form>`
@@ -547,8 +612,7 @@ async function renderAdminsTab(admin) {
   return `
     <div class="section">
       <h2>เพิ่มบัญชีแอดมิน/เจ้าหน้าที่ใหม่</h2>
-      <form method="POST" action="/api/admin/action" class="stack-form">
-        <input type="hidden" name="action" value="admin_create" />
+      <form method="POST" action="/api/admin/action?action=admin_create" class="stack-form">
         <label>Username</label>
         <input type="text" name="username" required />
         <label>Password</label>

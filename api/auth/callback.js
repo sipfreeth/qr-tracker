@@ -13,6 +13,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { getTier, getTierEvaluationPeriod, getCurrentYearStart } from '../../lib/tiers.js';
+import { createRedeemToken } from '../../lib/memberToken.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -153,7 +154,8 @@ export default async function handler(req, res) {
     return;
   }
 
-  // ทางที่ 3: มาจากการกดแลกของรางวัล
+  // ทางที่ 3: มาจากการกดแลกของรางวัล — เช็คแต้มพอไหม แล้วโชว์ฟอร์มกรอกที่อยู่จัดส่ง
+  // (ยังไม่หักแต้ม/บันทึกอะไรตรงนี้ จะหักตอนกรอกฟอร์มเสร็จแล้วส่งไปที่ api/redeem/confirm.js)
   if (parsedState.action === 'redeem') {
     const { data: reward } = await supabase
       .from('rewards')
@@ -174,22 +176,16 @@ export default async function handler(req, res) {
       return;
     }
 
-    const redemptionCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const { data: savedAddresses } = await supabase
+      .from('member_addresses')
+      .select('recipient_name, recipient_phone, recipient_address')
+      .eq('member_id', member.id)
+      .order('created_at', { ascending: false })
+      .limit(5);
 
-    const { error: redemptionError } = await supabase.from('redemptions').insert({
-      member_id: member.id,
-      reward_id: reward.id,
-      points_spent: reward.points_cost,
-      redemption_code: redemptionCode,
-    });
-
-    if (redemptionError) {
-      res.status(500).send('เกิดข้อผิดพลาด ลองใหม่อีกครั้ง');
-      return;
-    }
-
+    const token = createRedeemToken(member.id, reward.id);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(renderRedeemSuccessPage(reward, redemptionCode, spendableBalance - reward.points_cost));
+    res.status(200).send(renderShippingForm(reward, member, token, savedAddresses || []));
     return;
   }
 
@@ -343,29 +339,72 @@ function renderRewardsPage(member, rewards, tierScore, spendableBalance) {
 </html>`;
 }
 
-function renderRedeemSuccessPage(reward, code, newBalance) {
+function renderShippingForm(reward, member, token, savedAddresses) {
+  const addressOptions = savedAddresses
+    .map(
+      (a, i) =>
+        `<option value="${i}" data-name="${escapeAttr(a.recipient_name)}" data-phone="${escapeAttr(a.recipient_phone)}" data-address="${escapeAttr(a.recipient_address)}">${a.recipient_name} — ${a.recipient_address.slice(0, 30)}...</option>`
+    )
+    .join('');
+
+  const savedAddressPicker = savedAddresses.length
+    ? `
+      <label>ใช้ที่อยู่ที่เคยกรอกไว้ (ไม่บังคับ)</label>
+      <select id="savedAddress" onchange="fillAddress(this)">
+        <option value="">-- กรอกที่อยู่ใหม่ --</option>
+        ${addressOptions}
+      </select>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="th">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>แลกสำเร็จ</title>
+<title>กรอกที่อยู่จัดส่ง</title>
 <style>
-  body { font-family: sans-serif; background: #f7f8fa; margin: 0; padding: 24px; color: #1b1f27; text-align: center; }
-  .card { background: white; border-radius: 16px; padding: 32px 24px; max-width: 420px; margin: 40px auto 0; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
-  .code { font-size: 40px; font-weight: 700; letter-spacing: 6px; color: #06c755; margin: 16px 0; }
-  .hint { color: #6b7280; font-size: 14px; margin-top: 16px; }
+  body { font-family: sans-serif; background: #f7f8fa; margin: 0; padding: 24px; color: #1b1f27; }
+  .card { background: white; border-radius: 16px; padding: 24px; max-width: 420px; margin: 0 auto; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+  .reward-name { font-weight: 700; font-size: 18px; margin: 0 0 4px; }
+  .reward-cost { color: #6b7280; font-size: 13px; margin: 0 0 20px; }
+  label { display: block; font-size: 13px; color: #6b7280; margin: 14px 0 4px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  textarea { resize: vertical; min-height: 70px; }
+  button { width: 100%; background: #06c755; color: white; border: none; padding: 12px; border-radius: 8px; font-size: 14px; cursor: pointer; margin-top: 20px; }
 </style>
 </head>
 <body>
   <div class="card">
-    <p>แลก <strong>${reward.name}</strong> สำเร็จ</p>
-    <p class="code">${code}</p>
-    <p class="hint">โชว์โค้ดนี้ให้พนักงานหน้าร้าน เพื่อรับของรางวัล</p>
-    <p class="hint">Point คงเหลือ: ${newBalance.toLocaleString()}</p>
+    <p class="reward-name">${reward.name}</p>
+    <p class="reward-cost">ใช้ ${reward.points_cost.toLocaleString()} Point</p>
+    <p style="font-size:13px; color:#6b7280;">กรอกที่อยู่สำหรับจัดส่งของรางวัล — กดยืนยันแล้วแต้มจะถูกหักทันที</p>
+    ${savedAddressPicker}
+    <form method="POST" action="/api/redeem/confirm">
+      <input type="hidden" name="token" value="${token}" />
+      <label>ชื่อ-นามสกุลผู้รับ</label>
+      <input type="text" id="fieldName" name="recipient_name" value="${member.display_name || ''}" required />
+      <label>เบอร์โทรติดต่อ</label>
+      <input type="tel" id="fieldPhone" name="recipient_phone" required placeholder="08xxxxxxxx" />
+      <label>ที่อยู่จัดส่ง</label>
+      <textarea id="fieldAddress" name="recipient_address" required placeholder="บ้านเลขที่ ถนน ตำบล/แขวง อำเภอ/เขต จังหวัด รหัสไปรษณีย์"></textarea>
+      <button type="submit">ยืนยันการแลก</button>
+    </form>
   </div>
+  <script>
+    function fillAddress(select) {
+      const opt = select.options[select.selectedIndex];
+      if (!opt.dataset.name) return;
+      document.getElementById('fieldName').value = opt.dataset.name;
+      document.getElementById('fieldPhone').value = opt.dataset.phone;
+      document.getElementById('fieldAddress').value = opt.dataset.address;
+    }
+  </script>
 </body>
 </html>`;
+}
+
+function escapeAttr(str) {
+  return (str || '').replace(/"/g, '&quot;');
 }
 
 function renderErrorPage(title, message) {
