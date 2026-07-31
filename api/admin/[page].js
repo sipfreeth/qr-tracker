@@ -23,7 +23,11 @@ export default async function handler(req, res) {
   if (page === 'admins' && !can(admin.role, 'manage_admins')) page = 'dashboard'; // กันเข้าตรงๆ ผ่าน URL
 
   let content = '';
-  if (page === 'dashboard') content = await renderDashboardTab(req.query.filter_campaign || null);
+  if (page === 'dashboard') {
+    const campaignsParam = req.query.campaigns;
+    const filterCampaigns = campaignsParam ? (Array.isArray(campaignsParam) ? campaignsParam : [campaignsParam]) : [];
+    content = await renderDashboardTab(filterCampaigns);
+  }
   if (page === 'members') content = await renderMembersTab(admin, req.query.tier || null, req.query.detail || null);
   if (page === 'rewards') content = await renderRewardsTab(admin);
   if (page === 'campaigns') content = await renderCampaignsTab(admin, req);
@@ -34,7 +38,7 @@ export default async function handler(req, res) {
 }
 
 // ---------- Dashboard tab ----------
-async function renderDashboardTab(filterCampaign) {
+async function renderDashboardTab(filterCampaigns) {
   const [scanLogsRes, membersRes, redemptionsRes, creativesRes] = await Promise.all([
     supabase.from('scan_logs').select('creative_id, scanned_at'),
     supabase.from('members').select('id'),
@@ -76,40 +80,112 @@ async function renderDashboardTab(filterCampaign) {
   const scansByCreative = {};
   for (const row of scanLogs) scansByCreative[row.creative_id] = (scansByCreative[row.creative_id] || 0) + 1;
 
-  const pendingCount = redemptions.filter((r) => r.status === 'pending').length;
   const notShippedCount = redemptions.filter((r) => r.status === 'used' && r.shipping_status === 'not_shipped').length;
 
   const chartLabels = Object.keys(scansByCreative);
   const chartValues = Object.values(scansByCreative);
 
-  // รายละเอียดตาม Campaign ที่เลือก filter (ใครสแกนบ้าง เมื่อไหร่)
-  let campaignDetailHtml = '';
-  if (filterCampaign) {
-    const { data: engagementRows } = await supabase
-      .from('points_ledger')
-      .select('created_at, members(display_name, line_user_id)')
-      .eq('creative_id', filterCampaign)
-      .order('created_at', { ascending: false });
+  // ---------- ส่วนเปรียบเทียบหลาย Campaign พร้อมกัน (เลือกได้จาก checkbox) ----------
+  const selected = filterCampaigns.filter((id) => creativeIds.includes(id));
+  let comparisonHtml = '';
+  let trendChartScript = '';
 
-    const rows = (engagementRows || [])
-      .map(
-        (r) => `<tr><td>${r.members?.display_name || r.members?.line_user_id || '-'}</td><td>${new Date(r.created_at).toLocaleString('th-TH')}</td></tr>`
-      )
+  if (selected.length > 0) {
+    // ยอดพีค: วันไหนสแกนเยอะสุดของแต่ละ Campaign ที่เลือก
+    const dailyCountByCreative = {}; // { creative_id: { 'YYYY-MM-DD': count } }
+    for (const row of scanLogs) {
+      if (!selected.includes(row.creative_id)) continue;
+      const dateKey = new Date(row.scanned_at).toLocaleDateString('sv-SE'); // YYYY-MM-DD
+      if (!dailyCountByCreative[row.creative_id]) dailyCountByCreative[row.creative_id] = {};
+      dailyCountByCreative[row.creative_id][dateKey] = (dailyCountByCreative[row.creative_id][dateKey] || 0) + 1;
+    }
+
+    const peakRows = selected
+      .map((id) => {
+        const days = dailyCountByCreative[id] || {};
+        let peakDate = '-';
+        let peakCount = 0;
+        for (const [date, count] of Object.entries(days)) {
+          if (count > peakCount) {
+            peakCount = count;
+            peakDate = date;
+          }
+        }
+        const total = scansByCreative[id] || 0;
+        return `
+          <tr>
+            <td>${id}</td>
+            <td style="text-align:right; font-weight:700;">${total.toLocaleString()}</td>
+            <td style="text-align:right;">${peakCount.toLocaleString()}</td>
+            <td>${peakDate !== '-' ? new Date(peakDate).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }) : '-'}</td>
+          </tr>`;
+      })
       .join('');
 
-    campaignDetailHtml = `
+    // แนวโน้มรายสัปดาห์ ย้อนหลัง 8 สัปดาห์ (นับจากสัปดาห์นี้ถอยไป)
+    const WEEKS_TO_SHOW = 8;
+    const weekBuckets = [];
+    for (let i = WEEKS_TO_SHOW - 1; i >= 0; i--) {
+      const start = new Date(weekStart);
+      start.setDate(weekStart.getDate() - i * 7);
+      weekBuckets.push(start);
+    }
+    const weekLabels = weekBuckets.map((d) => d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }));
+
+    const weeklySeriesByCreative = {};
+    for (const id of selected) weeklySeriesByCreative[id] = new Array(WEEKS_TO_SHOW).fill(0);
+    for (const row of scanLogs) {
+      if (!selected.includes(row.creative_id)) continue;
+      const scannedAt = new Date(row.scanned_at);
+      for (let i = 0; i < WEEKS_TO_SHOW; i++) {
+        const bucketStart = weekBuckets[i];
+        const bucketEnd = new Date(bucketStart);
+        bucketEnd.setDate(bucketStart.getDate() + 7);
+        if (scannedAt >= bucketStart && scannedAt < bucketEnd) {
+          weeklySeriesByCreative[row.creative_id][i]++;
+          break;
+        }
+      }
+    }
+
+    const palette = ['#2a78d6', '#e76f51', '#06c755', '#d4a017', '#8b5cf6', '#0891b2', '#db2777', '#65a30d'];
+    const trendDatasets = selected.map((id, i) => ({
+      label: id,
+      data: weeklySeriesByCreative[id],
+      borderColor: palette[i % palette.length],
+      backgroundColor: palette[i % palette.length] + '22',
+      tension: 0.3,
+      fill: false,
+    }));
+
+    comparisonHtml = `
       <div class="section">
-        <h2>สมาชิกที่ Engage กับ Campaign "${filterCampaign}"</h2>
-        <p class="hint">${(engagementRows || []).length.toLocaleString()} คน</p>
+        <h2>เปรียบเทียบ ${selected.length} Campaign ที่เลือก</h2>
         <table>
-          <tr><th>สมาชิก</th><th>เวลาที่ Engage</th></tr>
-          ${rows || '<tr><td colspan="2" class="muted">ยังไม่มีใคร engage</td></tr>'}
+          <tr><th>Campaign</th><th style="text-align:right;">สแกนทั้งหมด</th><th style="text-align:right;">ยอดสูงสุดใน 1 วัน</th><th>วันที่ทำยอดสูงสุด</th></tr>
+          ${peakRows}
         </table>
+      </div>
+      <div class="section">
+        <h2>แนวโน้มรายสัปดาห์ (ย้อนหลัง ${WEEKS_TO_SHOW} สัปดาห์)</h2>
+        <div style="position:relative; height:280px;"><canvas id="trendChart"></canvas></div>
       </div>`;
+
+    trendChartScript = `
+      new Chart(document.getElementById('trendChart'), {
+        type: 'line',
+        data: { labels: ${JSON.stringify(weekLabels)}, datasets: ${JSON.stringify(trendDatasets)} },
+        options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false } }
+      });`;
   }
 
-  const creativeOptions = creativeIds
-    .map((id) => `<option value="${id}" ${filterCampaign === id ? 'selected' : ''}>${id}</option>`)
+  const campaignCheckboxes = creativeIds
+    .map(
+      (id) =>
+        `<label style="display:inline-flex; align-items:center; gap:4px; margin:4px 12px 4px 0; font-size:13px;">
+          <input type="checkbox" name="campaigns" value="${id}" ${selected.includes(id) ? 'checked' : ''} /> ${id}
+        </label>`
+    )
     .join('');
 
   const periodRows = Object.entries(statsByCreative)
@@ -174,17 +250,19 @@ async function renderDashboardTab(filterCampaign) {
     <div class="section">
       <h2>เปรียบเทียบยอดสแกนแยกตาม Campaign</h2>
       <div style="position:relative; height:260px;"><canvas id="scanChart"></canvas></div>
-      <form method="GET" action="/api/admin/dashboard" style="margin-top:16px; display:flex; gap:8px; align-items:center;">
-        <label style="font-size:13px; color:#6b7280;">ดูรายละเอียดของ Campaign:</label>
-        <select name="filter_campaign" class="table-input" style="max-width:220px;">
-          <option value="">-- เลือก --</option>
-          ${creativeOptions}
-        </select>
-        <button class="btn-small" type="submit">ดู</button>
+    </div>
+
+    <div class="section">
+      <h2>เลือก Campaign เพื่อเปรียบเทียบ (เลือกได้หลายอัน)</h2>
+      <p class="hint">เหมาะสำหรับเทียบหลายสาขา/สถานที่ของแบรนด์เดียวกัน</p>
+      <form method="GET" action="/api/admin/dashboard">
+        <div>${campaignCheckboxes || '<span class="muted">ยังไม่มี Campaign</span>'}</div>
+        <button class="btn-small" type="submit" style="margin-top:12px;">เปรียบเทียบ</button>
+        ${selected.length ? '<a href="/api/admin/dashboard" class="clear-filter">ล้างการเลือก</a>' : ''}
       </form>
     </div>
 
-    ${campaignDetailHtml}
+    ${comparisonHtml}
 
     <div class="section">
       <h2>ยอดสแกนแยกตาม Campaign — วันนี้ / สัปดาห์นี้ / เดือนนี้ / ทั้งหมด</h2>
@@ -212,6 +290,7 @@ async function renderDashboardTab(filterCampaign) {
         },
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
       });
+      ${trendChartScript}
     </script>`;
 }
 
