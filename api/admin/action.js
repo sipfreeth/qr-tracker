@@ -27,6 +27,7 @@
 import bcrypt from 'bcryptjs';
 import { supabase } from '../../lib/supabaseClient.js';
 import { requireAdmin, requirePermission, createSessionCookie, clearSessionCookie } from '../../lib/adminAuth.js';
+import { createUploadTarget, saveSlotContent } from '../../lib/officeArea.js';
 
 async function readBody(req) {
   let body = '';
@@ -273,6 +274,40 @@ export default async function handler(req, res) {
     await supabase.from('members').delete().eq('id', params.get('member_id'));
     res.writeHead(302, { Location: '/api/admin/members' });
     res.end();
+    return;
+  }
+
+  // ---------- 8. OFFICE AREA ACTIONS (admin/staff แก้ของ office ไหนก็ได้) ----------
+  if (actionParam === 'office_get_upload_url') {
+    const officeAccountId = req.query.office;
+    const slot = Number(req.query.slot);
+    try {
+      const target = await createUploadTarget(officeAccountId, slot, params.get('file_name') || 'file');
+      res.setHeader('Content-Type', 'application/json');
+      res.status(200).send(JSON.stringify(target));
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+    return;
+  }
+
+  if (actionParam === 'office_save_content') {
+    const officeAccountId = req.query.office;
+    const slot = Number(req.query.slot);
+    try {
+      await saveSlotContent({
+        officeAccountId,
+        slotNumber: slot,
+        fileName: params.get('file_name'),
+        filePath: params.get('file_path'),
+        fileType: params.get('file_type'),
+        displayAt: params.get('display_at') ? new Date(params.get('display_at')).toISOString() : null,
+        editorLabel: `${admin.username} (${admin.role})`,
+      });
+      res.status(200).send('ok');
+    } catch (err) {
+      res.status(500).send(err.message);
+    }
     return;
   }
 

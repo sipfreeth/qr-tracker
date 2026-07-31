@@ -12,8 +12,9 @@
 import { supabase } from '../../lib/supabaseClient.js';
 import { getTier, TIERS, getTierEvaluationPeriod, getCurrentYearStart } from '../../lib/tiers.js';
 import { requireAdmin, can } from '../../lib/adminAuth.js';
+import { listOfficeAccounts, getOfficeAccount, getSlots, renderOfficeAreaContent } from '../../lib/officeArea.js';
 
-const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins'];
+const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins', 'office'];
 
 export default async function handler(req, res) {
   const admin = await requireAdmin(req, res);
@@ -32,6 +33,7 @@ export default async function handler(req, res) {
   if (page === 'rewards') content = await renderRewardsTab(admin);
   if (page === 'campaigns') content = await renderCampaignsTab(admin, req);
   if (page === 'admins') content = await renderAdminsTab(admin);
+  if (page === 'office') content = await renderOfficeTab(req.query.office_id || null);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.status(200).send(renderLayout(page, admin, content));
@@ -721,6 +723,49 @@ async function renderAdminsTab(admin) {
     </div>`;
 }
 
+// ---------- Office Area tab (admin/staff เข้าดู/แก้ office ไหนก็ได้) ----------
+async function renderOfficeTab(selectedOfficeId) {
+  const offices = await listOfficeAccounts();
+
+  if (!offices.length) {
+    return `<div class="section"><p class="muted">ยังไม่มีบัญชี Office เลย — เพิ่มได้ผ่าน SQL (ดู migration-office-area.sql)</p></div>`;
+  }
+
+  const activeId = selectedOfficeId || offices[0].id;
+  const officeAccount = await getOfficeAccount(activeId);
+
+  const officeOptions = offices
+    .map((o) => `<option value="${o.id}" ${String(o.id) === String(activeId) ? 'selected' : ''}>${o.office_name} (${o.username})</option>`)
+    .join('');
+
+  const picker = `
+    <div class="section">
+      <h2>เลือก Office</h2>
+      <form method="GET" action="/api/admin/office" style="display:flex; gap:8px; align-items:center;">
+        <select name="office_id" class="table-input" style="max-width:280px;" onchange="this.form.submit()">
+          ${officeOptions}
+        </select>
+      </form>
+    </div>`;
+
+  if (!officeAccount) {
+    return picker + `<div class="section"><p class="muted">ไม่พบ Office นี้</p></div>`;
+  }
+
+  const slots = await getSlots(officeAccount.id);
+  const officeContent = renderOfficeAreaContent({
+    officeAccount,
+    slots,
+    canEdit: true,
+    uploadUrlAction: `/api/admin/action?action=office_get_upload_url&office=${officeAccount.id}`,
+    saveAction: `/api/admin/action?action=office_save_content&office=${officeAccount.id}`,
+    supabaseUrl: process.env.SUPABASE_URL,
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
+  });
+
+  return picker + officeContent;
+}
+
 // ---------- Layout ----------
 function renderLayout(activePage, admin, content) {
   const tabs = [
@@ -728,6 +773,7 @@ function renderLayout(activePage, admin, content) {
     { key: 'members', label: 'Members' },
     { key: 'rewards', label: 'Rewards' },
     { key: 'campaigns', label: 'Campaigns' },
+    { key: 'office', label: 'Office Area' },
   ];
   if (can(admin.role, 'manage_admins')) tabs.push({ key: 'admins', label: 'Admins' });
 
