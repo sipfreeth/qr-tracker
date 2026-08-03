@@ -26,7 +26,7 @@
 
 import bcrypt from 'bcryptjs';
 import { supabase } from '../../lib/supabaseClient.js';
-import { requireAdmin, requirePermission, createSessionCookie, clearSessionCookie } from '../../lib/adminAuth.js';
+import { requireAdmin, requirePermission, can, createSessionCookie, clearSessionCookie } from '../../lib/adminAuth.js';
 import { createUploadTarget, saveSlotContent } from '../../lib/officeArea.js';
 
 async function readBody(req) {
@@ -204,20 +204,43 @@ export default async function handler(req, res) {
     return;
   }
 
-  // ---------- 6. ADMIN USER ACTIONS (super_admin เท่านั้น) ----------
+  // ---------- 6. ADMIN USER ACTIONS ----------
+  // super_admin (manage_admins) จัดการได้ทุกบัญชี ทุก role
+  // admin (manage_staff) จัดการได้แค่บัญชีที่ role = 'staff' เท่านั้น เปลี่ยน role ไม่ได้เลย
   if (['admin_create', 'admin_update_role', 'admin_reset_password', 'admin_delete'].includes(actionParam)) {
-    if (!requirePermission(res, admin.role, 'manage_admins')) return;
+    const fullAccess = can(admin.role, 'manage_admins');
+    const staffOnlyAccess = can(admin.role, 'manage_staff');
+
+    if (!fullAccess && !staffOnlyAccess) {
+      res.status(403).send('คุณไม่มีสิทธิ์ทำรายการนี้');
+      return;
+    }
+
+    async function targetIsStaff(username) {
+      const { data } = await supabase.from('admin_users').select('role').eq('username', username).maybeSingle();
+      return data?.role === 'staff';
+    }
 
     if (actionParam === 'admin_create') {
+      const newRole = params.get('role');
+      if (!fullAccess && newRole !== 'staff') {
+        res.status(403).send('คุณสร้างบัญชีได้แค่ระดับ Staff เท่านั้น');
+        return;
+      }
       const hash = await bcrypt.hash(params.get('password'), 10);
       await supabase.from('admin_users').insert({
         username: params.get('username'),
         password_hash: hash,
-        role: params.get('role'),
+        role: newRole,
       });
     }
 
     if (actionParam === 'admin_update_role') {
+      // เปลี่ยน role ได้แค่ super_admin เท่านั้น (การเลื่อนขั้นเป็นสิทธิ์สูงสุด)
+      if (!fullAccess) {
+        res.status(403).send('คุณไม่มีสิทธิ์เปลี่ยน role');
+        return;
+      }
       if (params.get('username') === admin.username) {
         res.status(400).send('ไม่สามารถเปลี่ยน role ของบัญชีตัวเองได้ ให้ super_admin คนอื่นเปลี่ยนให้');
         return;
@@ -226,6 +249,10 @@ export default async function handler(req, res) {
     }
 
     if (actionParam === 'admin_reset_password') {
+      if (!fullAccess && !(await targetIsStaff(params.get('username')))) {
+        res.status(403).send('คุณรีเซ็ตรหัสผ่านได้แค่บัญชี Staff เท่านั้น');
+        return;
+      }
       const hash = await bcrypt.hash(params.get('password'), 10);
       await supabase.from('admin_users').update({ password_hash: hash }).eq('username', params.get('username'));
     }
@@ -235,10 +262,60 @@ export default async function handler(req, res) {
         res.status(400).send('ไม่สามารถลบบัญชีตัวเองได้');
         return;
       }
+      if (!fullAccess && !(await targetIsStaff(params.get('username')))) {
+        res.status(403).send('คุณลบได้แค่บัญชี Staff เท่านั้น');
+        return;
+      }
       await supabase.from('admin_users').delete().eq('username', params.get('username'));
     }
 
     res.writeHead(302, { Location: '/api/admin/admins' });
+    res.end();
+    return;
+  }
+
+  // ---------- 6b. OFFICE ACCOUNT MANAGEMENT (super_admin, admin) ----------
+  if (['office_account_create', 'office_account_update', 'office_account_delete'].includes(actionParam)) {
+    if (!requirePermission(res, admin.role, 'manage_offices')) return;
+
+    if (actionParam === 'office_account_create') {
+      const hash = await bcrypt.hash(params.get('password'), 10);
+      await supabase.from('office_accounts').insert({
+        office_name: params.get('office_name'),
+        username: params.get('username'),
+        password_hash: hash,
+      });
+    }
+
+    if (actionParam === 'office_account_update') {
+      const updates = { office_name: params.get('office_name') };
+      const newPassword = params.get('password');
+      if (newPassword) updates.password_hash = await bcrypt.hash(newPassword, 10);
+      await supabase.from('office_accounts').update(updates).eq('id', params.get('office_id'));
+    }
+
+    if (actionParam === 'office_account_delete') {
+      await supabase.from('office_accounts').delete().eq('id', params.get('office_id'));
+    }
+
+    res.writeHead(302, { Location: '/api/admin/office' });
+    res.end();
+    return;
+  }
+
+  // ---------- 6c. เปลี่ยนรหัสผ่านของตัวเอง (ทุก role ทำได้ ไม่ต้องมีสิทธิ์พิเศษ) ----------
+  if (actionParam === 'change_my_password') {
+    const { data: user } = await supabase.from('admin_users').select('password_hash').eq('username', admin.username).single();
+    const valid = user && (await bcrypt.compare(params.get('current_password') || '', user.password_hash));
+
+    if (!valid) {
+      res.status(400).send('รหัสผ่านปัจจุบันไม่ถูกต้อง');
+      return;
+    }
+
+    const hash = await bcrypt.hash(params.get('new_password'), 10);
+    await supabase.from('admin_users').update({ password_hash: hash }).eq('username', admin.username);
+    res.writeHead(302, { Location: '/api/admin/account' });
     res.end();
     return;
   }

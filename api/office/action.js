@@ -73,6 +73,24 @@ export default async function handler(req, res) {
     return;
   }
 
+  // ---------- เปลี่ยนรหัสผ่านของตัวเอง (ไม่เกี่ยวกับ slot) ----------
+  if (actionParam === 'change_password') {
+    const params = await readBody(req);
+    const { data: row } = await supabase.from('office_accounts').select('password_hash').eq('id', office.id).single();
+    const valid = row && (await bcrypt.compare(params.get('current_password') || '', row.password_hash));
+
+    if (!valid) {
+      res.status(400).send('รหัสผ่านปัจจุบันไม่ถูกต้อง');
+      return;
+    }
+
+    const hash = await bcrypt.hash(params.get('new_password'), 10);
+    await supabase.from('office_accounts').update({ password_hash: hash }).eq('id', office.id);
+    res.writeHead(302, { Location: '/api/office' });
+    res.end();
+    return;
+  }
+
   const slot = Number(req.query.slot);
   if (![1, 2, 3].includes(slot)) {
     res.status(400).send('slot ไม่ถูกต้อง');

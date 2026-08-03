@@ -22,6 +22,18 @@ export default async function handler(req, res) {
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
   });
 
+  const passwordSection = `
+    <div class="section">
+      <h2>เปลี่ยนรหัสผ่านของฉัน</h2>
+      <form method="POST" action="/api/office/action?action=change_password">
+        <label>รหัสผ่านปัจจุบัน</label>
+        <input type="password" name="current_password" required />
+        <label>รหัสผ่านใหม่</label>
+        <input type="password" name="new_password" required minlength="6" />
+        <button type="submit" class="btn-primary" style="margin-top:12px;">บันทึกรหัสผ่านใหม่</button>
+      </form>
+    </div>`;
+
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.status(200).send(`<!DOCTYPE html>
 <html lang="th">
@@ -49,7 +61,7 @@ export default async function handler(req, res) {
     <div class="brand">Office Area</div>
     <a href="/api/office/action?action=logout" class="logout-link">Logout</a>
   </header>
-  <main>${content}</main>
+  <main>${content}${passwordSection}</main>
 </body>
 </html>`);
 }

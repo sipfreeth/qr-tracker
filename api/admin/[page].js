@@ -14,14 +14,14 @@ import { getTier, TIERS, getTierEvaluationPeriod, getCurrentYearStart } from '..
 import { requireAdmin, can } from '../../lib/adminAuth.js';
 import { listOfficeAccounts, getOfficeAccount, getSlots, renderOfficeAreaContent } from '../../lib/officeArea.js';
 
-const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins', 'office'];
+const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins', 'office', 'account'];
 
 export default async function handler(req, res) {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
   let page = PAGES.includes(req.query.page) ? req.query.page : 'dashboard';
-  if (page === 'admins' && !can(admin.role, 'manage_admins')) page = 'dashboard'; // กันเข้าตรงๆ ผ่าน URL
+  if (page === 'admins' && !can(admin.role, 'manage_admins') && !can(admin.role, 'manage_staff')) page = 'dashboard'; // กันเข้าตรงๆ ผ่าน URL
 
   let content = '';
   if (page === 'dashboard') {
@@ -33,7 +33,8 @@ export default async function handler(req, res) {
   if (page === 'rewards') content = await renderRewardsTab(admin);
   if (page === 'campaigns') content = await renderCampaignsTab(admin, req);
   if (page === 'admins') content = await renderAdminsTab(admin);
-  if (page === 'office') content = await renderOfficeTab(req.query.office_id || null);
+  if (page === 'office') content = await renderOfficeTab(admin, req.query.office_id || null);
+  if (page === 'account') content = renderAccountTab(admin);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.status(200).send(renderLayout(page, admin, content));
@@ -657,78 +658,98 @@ async function renderCampaignsTab(admin, req) {
 
 // ---------- Admins tab (super_admin เท่านั้น) ----------
 async function renderAdminsTab(admin) {
-  const { data: admins } = await supabase.from('admin_users').select('username, role, created_at').order('created_at');
+  const fullAccess = can(admin.role, 'manage_admins'); // super_admin: จัดการได้ทุกคน ทุก role
+  const { data: allAdmins } = await supabase.from('admin_users').select('username, role, created_at').order('created_at');
+
+  // ถ้าไม่ใช่ full access (คือเป็น 'admin') เห็นแค่บัญชี staff เท่านั้น ไม่เห็น/แตะบัญชี admin หรือ super_admin คนอื่น
+  const visibleAdmins = fullAccess ? allAdmins || [] : (allAdmins || []).filter((a) => a.role === 'staff');
 
   const roleOptions = (selected) =>
     ['super_admin', 'admin', 'staff']
       .map((r) => `<option value="${r}" ${r === selected ? 'selected' : ''}>${r}</option>`)
       .join('');
 
-  const rows = (admins || [])
+  const rows = visibleAdmins
     .map((a) => {
       const isSelf = a.username === admin.username;
+      const roleCell = isSelf
+        ? a.role
+        : fullAccess
+        ? `<form method="POST" action="/api/admin/action?action=admin_update_role" class="inline-form">
+             <input type="hidden" name="username" value="${a.username}" />
+             <select name="role" class="table-input">${roleOptions(a.role)}</select>
+           </td>
+           <td style="text-align:center;"><button class="btn-small">บันทึก</button></form>`
+        : a.role; // admin เห็น role ของ staff ได้ แต่แก้ไม่ได้
+
+      const resetForm = isSelf
+        ? ''
+        : `<form method="POST" action="/api/admin/action?action=admin_reset_password" class="inline-form">
+             <input type="hidden" name="username" value="${a.username}" />
+             <input type="hidden" name="password" value="" />
+             <button type="button" class="btn-small" onclick="const p=prompt('ตั้งรหัสผ่านใหม่ให้ ${a.username}'); if(p){ this.form.password.value=p; this.form.submit(); }">รีเซ็ตรหัสผ่าน</button>
+           </form>`;
+
+      const deleteForm = isSelf
+        ? ''
+        : `<form method="POST" action="/api/admin/action?action=admin_delete" onsubmit="return confirm('ลบบัญชี ${a.username}?')" style="display:inline;">
+             <input type="hidden" name="username" value="${a.username}" />
+             <button class="btn-small btn-danger">ลบ</button>
+           </form>`;
+
       return `
         <tr>
           <td>${a.username}${isSelf ? ' <span class="hint">(คุณ)</span>' : ''}</td>
-          <td>
-            ${
-              isSelf
-                ? a.role
-                : `<form method="POST" action="/api/admin/action?action=admin_update_role" class="inline-form">
-                     <input type="hidden" name="username" value="${a.username}" />
-                     <select name="role" class="table-input">${roleOptions(a.role)}</select>
-                   </td>
-                   <td style="text-align:center;"><button class="btn-small">บันทึก</button></form>`
-            }
-          </td>
+          <td>${roleCell}</td>
           <td>${new Date(a.created_at).toLocaleDateString('th-TH')}</td>
-          <td style="text-align:center;">
-            ${
-              isSelf
-                ? ''
-                : `<form method="POST" action="/api/admin/action?action=admin_delete" onsubmit="return confirm('ลบบัญชี ${a.username}?')" style="display:inline;">
-                     <input type="hidden" name="username" value="${a.username}" />
-                     <button class="btn-small btn-danger">ลบ</button>
-                   </form>`
-            }
-          </td>
+          <td style="text-align:center;">${resetForm}</td>
+          <td style="text-align:center;">${deleteForm}</td>
         </tr>`;
     })
     .join('');
 
-  return `
-    <div class="section">
-      <h2>เพิ่มบัญชีแอดมิน/เจ้าหน้าที่ใหม่</h2>
-      <form method="POST" action="/api/admin/action?action=admin_create" class="stack-form">
-        <label>Username</label>
-        <input type="text" name="username" required />
-        <label>Password</label>
-        <input type="password" name="password" required />
+  const roleSelector = fullAccess
+    ? `
         <label>Role</label>
         <select name="role" style="padding:8px; border:1px solid #e5e7eb; border-radius:6px;">
           <option value="staff">staff</option>
           <option value="admin">admin</option>
           <option value="super_admin">super_admin</option>
-        </select>
+        </select>`
+    : `<input type="hidden" name="role" value="staff" />`; // admin สร้างได้แค่ staff เท่านั้น
+
+  return `
+    <div class="section">
+      <h2>เพิ่มบัญชี${fullAccess ? 'แอดมิน/เจ้าหน้าที่' : 'เจ้าหน้าที่ (Staff)'}ใหม่</h2>
+      ${!fullAccess ? '<p class="hint">คุณเพิ่มได้แค่บัญชีระดับ Staff เท่านั้น</p>' : ''}
+      <form method="POST" action="/api/admin/action?action=admin_create" class="stack-form">
+        <label>Username</label>
+        <input type="text" name="username" required />
+        <label>Password</label>
+        <input type="password" name="password" required />
+        ${roleSelector}
         <button type="submit" class="btn-primary">เพิ่มบัญชี</button>
       </form>
     </div>
     <div class="section">
-      <h2>บัญชีแอดมินทั้งหมด</h2>
-      <p class="hint">super_admin: ทำได้ทุกอย่าง | admin: ทำได้เกือบทุกอย่างยกเว้นจัดการบัญชีแอดมิน | staff: สร้าง/เปิดปิด Campaign และ Reward ได้ แก้ไข/ลบไม่ได้ แตะข้อมูลสมาชิกไม่ได้</p>
+      <h2>${fullAccess ? 'บัญชีแอดมินทั้งหมด' : 'บัญชี Staff ทั้งหมด'}</h2>
+      <p class="hint">super_admin: ทำได้ทุกอย่าง | admin: จัดการบัญชี Staff/Office ได้ แตะบัญชี Admin คนอื่นไม่ได้ | staff: สร้าง/เปิดปิด Campaign และ Reward ได้ จัดการบัญชีใครไม่ได้เลย</p>
       <table>
-        <tr><th>Username</th><th>Role</th><th>สร้างเมื่อ</th><th></th></tr>
-        ${rows || '<tr><td colspan="4" class="muted">ไม่มีบัญชี</td></tr>'}
+        <tr><th>Username</th><th>Role</th><th>สร้างเมื่อ</th><th>รหัสผ่าน</th><th></th></tr>
+        ${rows || '<tr><td colspan="5" class="muted">ไม่มีบัญชี</td></tr>'}
       </table>
     </div>`;
 }
 
 // ---------- Office Area tab (admin/staff เข้าดู/แก้ office ไหนก็ได้) ----------
-async function renderOfficeTab(selectedOfficeId) {
+async function renderOfficeTab(admin, selectedOfficeId) {
+  const canManageOffices = can(admin.role, 'manage_offices');
   const offices = await listOfficeAccounts();
 
+  const manageSection = canManageOffices ? renderOfficeAccountManagement(offices) : '';
+
   if (!offices.length) {
-    return `<div class="section"><p class="muted">ยังไม่มีบัญชี Office เลย — เพิ่มได้ผ่าน SQL (ดู migration-office-area.sql)</p></div>`;
+    return manageSection + `<div class="section"><p class="muted">ยังไม่มีบัญชี Office เลย เพิ่มได้จากฟอร์มด้านบน</p></div>`;
   }
 
   const activeId = selectedOfficeId || offices[0].id;
@@ -749,7 +770,7 @@ async function renderOfficeTab(selectedOfficeId) {
     </div>`;
 
   if (!officeAccount) {
-    return picker + `<div class="section"><p class="muted">ไม่พบ Office นี้</p></div>`;
+    return manageSection + picker + `<div class="section"><p class="muted">ไม่พบ Office นี้</p></div>`;
   }
 
   const slots = await getSlots(officeAccount.id);
@@ -763,7 +784,74 @@ async function renderOfficeTab(selectedOfficeId) {
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
   });
 
-  return picker + officeContent;
+  return manageSection + picker + officeContent;
+}
+
+// จัดการบัญชี Office (สร้าง/แก้ชื่อ-รหัสผ่าน/ลบ) — super_admin, admin เท่านั้น
+function renderOfficeAccountManagement(offices) {
+  const rows = offices
+    .map(
+      (o) => `
+        <tr>
+          <td>
+            <form method="POST" action="/api/admin/action?action=office_account_update" class="inline-form">
+              <input type="hidden" name="office_id" value="${o.id}" />
+              <input type="text" name="office_name" value="${o.office_name}" class="table-input" />
+          </td>
+          <td>${o.username}</td>
+          <td>
+              <input type="password" name="password" placeholder="(เว้นว่างถ้าไม่เปลี่ยน)" class="table-input" />
+          </td>
+          <td style="text-align:center;"><button class="btn-small">บันทึก</button></form></td>
+          <td style="text-align:center;">
+            <form method="POST" action="/api/admin/action?action=office_account_delete" onsubmit="return confirm('ลบบัญชี Office นี้? Content ทั้ง 3 Slot จะหายไปด้วย')" style="display:inline;">
+              <input type="hidden" name="office_id" value="${o.id}" />
+              <button class="btn-small btn-danger">ลบ</button>
+            </form>
+          </td>
+        </tr>`
+    )
+    .join('');
+
+  return `
+    <div class="section">
+      <h2>เพิ่มบัญชี Office ใหม่</h2>
+      <form method="POST" action="/api/admin/action?action=office_account_create" class="stack-form">
+        <label>ชื่อ Office/สาขา</label>
+        <input type="text" name="office_name" required />
+        <label>Username</label>
+        <input type="text" name="username" required />
+        <label>Password</label>
+        <input type="password" name="password" required />
+        <button type="submit" class="btn-primary">เพิ่มบัญชี Office</button>
+      </form>
+    </div>
+    <div class="section">
+      <h2>จัดการบัญชี Office ทั้งหมด</h2>
+      <table>
+        <tr><th>ชื่อ Office</th><th>Username</th><th>รีเซ็ตรหัสผ่าน</th><th></th><th></th></tr>
+        ${rows || '<tr><td colspan="5" class="muted">ยังไม่มีบัญชี Office</td></tr>'}
+      </table>
+    </div>`;
+}
+
+// ---------- My Account tab (ทุก role เห็น — เปลี่ยนรหัสผ่านตัวเอง) ----------
+function renderAccountTab(admin) {
+  return `
+    <div class="section">
+      <h2>บัญชีของฉัน</h2>
+      <p class="hint">Username: ${admin.username} — Role: ${admin.role}</p>
+    </div>
+    <div class="section">
+      <h2>เปลี่ยนรหัสผ่าน</h2>
+      <form method="POST" action="/api/admin/action?action=change_my_password" class="stack-form">
+        <label>รหัสผ่านปัจจุบัน</label>
+        <input type="password" name="current_password" required />
+        <label>รหัสผ่านใหม่</label>
+        <input type="password" name="new_password" required minlength="6" />
+        <button type="submit" class="btn-primary">บันทึกรหัสผ่านใหม่</button>
+      </form>
+    </div>`;
 }
 
 // ---------- Layout ----------
@@ -775,7 +863,8 @@ function renderLayout(activePage, admin, content) {
     { key: 'campaigns', label: 'Campaigns' },
     { key: 'office', label: 'Office Area' },
   ];
-  if (can(admin.role, 'manage_admins')) tabs.push({ key: 'admins', label: 'Admins' });
+  if (can(admin.role, 'manage_admins') || can(admin.role, 'manage_staff')) tabs.push({ key: 'admins', label: 'Admins' });
+  tabs.push({ key: 'account', label: 'My Account' });
 
   const nav = tabs
     .map((t) => `<a href="/api/admin/${t.key}" class="tab ${activePage === t.key ? 'active' : ''}">${t.label}</a>`)
