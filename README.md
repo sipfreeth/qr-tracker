@@ -184,6 +184,162 @@ values ('ชื่อเจ้าหน้าที่', crypt('รหัสผ�
 - **Members** — คลิกชื่อสมาชิกเพื่อดูรายละเอียด: ประวัติ Engagement ทุกครั้ง (Campaign ไหน ได้ Tier Score/Point เท่าไหร่), ประวัติการแลก Reward ทั้งหมด, ฟอร์มปรับ Tier Score/Point ด้วยมือ (super_admin/admin เท่านั้น), ปุ่มลบสมาชิกแบบต้องติ๊กยืนยัน + popup ยืนยันอีกชั้น (2 ชั้นตามที่ขอ)
 - **Rewards / Campaigns** — เพิ่ม/แก้/เปิดปิด/**ลบ** ได้ในหน้าเดียว (staff เห็นแค่เปิดปิด แก้ไข/ลบไม่ได้)
 
+## อัปเดต: สถิติสแกนตามช่วงเวลา + จัดส่งของรางวัล + Address Book + ลิงก์ QR
+
+### 1. รัน Migration
+รัน `migration-shipping-and-addresses.sql` ใน Supabase SQL Editor
+
+### 2. สิ่งที่เปลี่ยน/เพิ่ม
+- **Dashboard** — ตารางเปรียบเทียบยอดสแกนแต่ละ Campaign แยก วันนี้ / สัปดาห์นี้ / เดือนนี้ / ทั้งหมด
+- **แลกของรางวัล** — ลูกค้ากดแลก → กรอกชื่อ/เบอร์/ที่อยู่ → ยืนยัน → หักแต้มทันที ไม่มี "รอยืนยัน" อีกต่อไป (ระบบใหม่ทั้งหมด ไม่ใช่โชว์โค้ดหน้าร้านแบบเดิม)
+  - ถ้าเคยแลกมาก่อน จะมี dropdown ให้เลือกที่อยู่เดิมได้เลย ไม่ต้องพิมพ์ใหม่
+  - ทุกที่อยู่ที่ใช้ จะถูกเก็บสะสมไว้ในบัญชีสมาชิกอัตโนมัติ (ตาราง `member_addresses`)
+- **สถานะจัดส่ง** — แยกจากสถานะ "ใช้แล้ว" เป็นคนละอย่าง มีปุ่ม toggle "จัดส่งแล้ว / ยังไม่จัดส่ง" ทั้งใน Dashboard และหน้ารายละเอียดสมาชิก
+- **Campaigns tab** — แต่ละ Campaign มีลิงก์ QR เต็มพร้อมปุ่ม "ก็อปลิงก์" กดครั้งเดียวก็อปไปสร้าง QR ได้เลย ไม่ต้องพิมพ์เอง
+
+### 3. ไฟล์ที่ต้องอัปเดต/เพิ่มบน GitHub
+- ไฟล์ใหม่: `lib/memberToken.js`, `api/redeem/confirm.js`
+- ไฟล์แก้: `api/auth/callback.js`, `api/admin/[page].js`, `api/admin/action.js`
+
+## อัปเดต: เปรียบเทียบหลาย Campaign พร้อมกัน (Dashboard)
+
+### สิ่งที่เพิ่ม
+- **เลือกได้หลาย Campaign พร้อมกัน** ผ่าน checkbox (เดิมเลือกได้แค่ 1) เหมาะกับแบรนด์ที่มีหลายสาขา/สถานที่ อยากเทียบผลลัพธ์กัน
+- **ตารางเปรียบเทียบ** — สแกนทั้งหมด, ยอดสูงสุดใน 1 วัน, วันที่ทำยอดสูงสุด ของแต่ละ Campaign ที่เลือก
+- **กราฟแนวโน้มรายสัปดาห์** — เส้นกราฟย้อนหลัง 8 สัปดาห์ แยกสีตาม Campaign ที่เลือก เทียบกันในกราฟเดียว
+
+### วิธีใช้
+เข้า Dashboard → เลื่อนไปหัวข้อ "เลือก Campaign เพื่อเปรียบเทียบ" → ติ๊กเลือก Campaign ที่ต้องการ (กี่อันก็ได้) → กด "เปรียบเทียบ"
+
+### ไฟล์ที่ต้องอัปเดต
+`api/admin/[page].js` (แก้ทั้งฟังก์ชัน Dashboard tab)
+
+## ฟีเจอร์ใหม่: Office Area (ให้ Office อัปโหลด Content)
+
+### ภาพรวม
+- แต่ละ Office มีบัญชีของตัวเอง ล็อกอินแล้วเห็น**แค่หน้าเดียว** (ไม่เห็นเมนู Dashboard/Members อื่นๆ)
+- มี Content ได้ 3 Slot ต่อ 1 Office แต่ละ Slot อัปโหลด รูป/วิดีโอ ได้ (JPEG, PNG, MP4 ไม่เกิน 125MB) พร้อมตั้งชื่อไฟล์และวันเวลาที่ต้องการให้แสดง
+- **Admin และ Staff** เข้าดู/แก้ไข Content ของ **Office ไหนก็ได้** ผ่านแท็บ **"Office Area"** ในหน้า Admin Panel เดิม (มี dropdown เลือก Office)
+- ทุกครั้งที่แก้ไข ระบบบันทึกว่า **ใครแก้ไขล่าสุด** (ไม่ว่าจะเป็น Office เองหรือ Admin/Staff) และเวลาไหน
+
+### ทำไมต้องอัปโหลดตรงไป Supabase Storage
+ไฟล์ใหญ่ถึง 125MB **อัปโหลดผ่าน Vercel Serverless Function ตรงๆ ไม่ได้** (เกินขีดจำกัดขนาด request) ระบบนี้เลยให้เบราว์เซอร์อัปโหลดไฟล์ตรงไปที่ Supabase Storage เลย ผ่าน "Signed Upload URL" ที่ฝั่งเซิร์ฟเวอร์สร้างให้ชั่วคราว — Vercel แค่รับข้อมูล (ชื่อไฟล์, เวลาแสดง) เท่านั้น ไม่ต้องรับไฟล์จริง
+
+### ขั้นตอนติดตั้ง
+
+**1. สร้าง Storage Bucket ใน Supabase**
+1. เข้า Supabase → เมนูซ้าย **Storage**
+2. กด **New bucket**
+3. ตั้งชื่อ **`office-content`** (สะกดตรงนี้สำคัญมาก ต้องตรงเป๊ะ)
+4. **ปล่อย Public bucket ไว้ไม่ต้องติ๊ก (เป็น Private)** — เพราะเป็นข้อมูลเฉพาะพนักงาน ไม่ควรให้คนนอกเข้าถึงได้ ระบบจะสร้างลิงก์ชั่วคราว (signed URL อายุ 1 ชั่วโมง) ให้เฉพาะตอนคนที่ login แล้วเปิดดูหน้า Office Area เท่านั้น
+5. (แนะนำ) ตั้ง **File size limit** เป็น 125MB ในตั้งค่า bucket เผื่อกันไฟล์ใหญ่เกินหลุดเข้ามา
+
+**2. หา Anon/Public Key มาเพิ่ม Environment Variable**
+1. ใน Supabase เข้า **Project Settings > API**
+2. หาแถว **`anon` `public`** (คนละอันกับ service_role ที่ใช้อยู่แล้ว) ก็อปค่า
+3. ไปที่ Vercel → Settings → Environment Variables → เพิ่ม:
+   - `SUPABASE_ANON_KEY` = ค่าที่ก็อปมา
+
+**3. รัน Migration**
+รัน `migration-office-area.sql` ใน Supabase SQL Editor — **แก้ username/password ตัวอย่างในไฟล์ก่อนรัน**
+
+**4. อัปโหลดไฟล์โค้ดขึ้น GitHub**
+ไฟล์ใหม่ทั้งหมด:
+- `lib/officeAuth.js`
+- `lib/officeArea.js`
+- `api/office/index.js`
+- `api/office/action.js`
+
+ไฟล์แก้:
+- `api/admin/action.js` (เพิ่ม action จัดการ office)
+- `api/admin/[page].js` (เพิ่มแท็บ Office Area)
+
+**5. Redeploy แล้วทดสอบ**
+- **ฝั่ง Office:** เข้า `https://your-project.vercel.app/api/office/action?action=login` ล็อกอินด้วย username/password ที่ตั้งไว้ตอนรัน SQL → ควรเห็นหน้า Office Area 3 Slot ให้อัปโหลด
+- **ฝั่ง Admin/Staff:** เข้า Admin Panel ปกติ → กดแท็บ **Office Area** → เลือก Office จาก dropdown → เห็นและแก้ไขได้เหมือนกัน
+
+### เพิ่ม Office สาขาใหม่
+รัน SQL นี้ (เปลี่ยนชื่อสาขา/username/password ตามจริง):
+```sql
+insert into office_accounts (office_name, username, password_hash)
+values ('ชื่อสาขาใหม่', 'ชื่อ username', crypt('รหัสผ่าน', gen_salt('bf')));
+```
+
+## อัปเดต: จัดการบัญชี Staff/Office + เปลี่ยนรหัสผ่านตัวเอง
+
+### สิ่งที่เพิ่ม
+- **Admin จัดการบัญชี Staff และ Office ได้แล้ว** (เดิมทำได้แค่ Super Admin) — สร้าง/รีเซ็ตรหัสผ่าน/ลบได้ แต่**แตะบัญชี Admin/Super Admin คนอื่นไม่ได้** และ**เปลี่ยน role ใครไม่ได้เลย** (สิทธิ์นี้ยังเป็นของ Super Admin คนเดียว)
+- **จัดการบัญชี Office ได้ในหน้าเว็บ** — แท็บ Office Area มีฟอร์มเพิ่ม/แก้ชื่อ-รหัสผ่าน/ลบ Office ให้เลย ไม่ต้องรัน SQL มือแล้ว (Super Admin, Admin ทำได้)
+- **แท็บ "My Account" ใหม่** — ทุกคนเปลี่ยนรหัสผ่านตัวเองได้ (ต้องใส่รหัสผ่านเดิมยืนยันก่อน) มีทั้งฝั่ง Admin Panel และฝั่ง Office (อยู่ล่างสุดของหน้า Office Area)
+
+### สรุปสิทธิ์ล่าสุด
+| Role | จัดการบัญชี Admin/Super Admin | จัดการบัญชี Staff | จัดการบัญชี Office | เปลี่ยน role ใคร |
+|---|---|---|---|---|
+| super_admin | ✅ | ✅ | ✅ | ✅ |
+| admin | ❌ | ✅ | ✅ | ❌ |
+| staff | ❌ | ❌ | ❌ | ❌ |
+
+### ไฟล์ที่ต้องอัปเดตบน GitHub
+`lib/adminAuth.js`, `api/admin/action.js`, `api/admin/[page].js`, `api/office/action.js`, `api/office/index.js`
+
+ไม่ต้องรัน SQL เพิ่ม (ใช้ตารางเดิมที่มีอยู่แล้ว)
+
+## อัปเดต: Tier Score ได้วันละครั้งต่อ Campaign (Point ยังคงครั้งแรกครั้งเดียวเหมือนเดิม)
+
+### กติกาใหม่
+- **Tier Score** — สแกน Campaign เดิมได้อีกทุกวัน (วันละ 1 ครั้งต่อ Campaign) ไม่ใช่ครั้งแรกครั้งเดียวตลอดไปแบบเดิม
+- **Point (สำหรับแลก Reward)** — ยังคงได้แค่**ครั้งแรกครั้งเดียวตลอดไป**ต่อ Campaign เหมือนเดิม ไม่เปลี่ยน
+
+ตัวอย่าง: สแกน Campaign A วันจันทร์ → ได้ทั้ง Tier Score และ Point (เพราะเป็นครั้งแรก) → สแกน Campaign A อีกวันอังคาร → ได้แค่ Tier Score เพิ่ม (Point ไม่ได้อีกแล้ว เพราะเคยได้ไปแล้ว)
+
+### 1. รัน Migration
+รัน `migration-daily-tier-score.sql` ใน Supabase SQL Editor
+
+### 2. ไฟล์ที่ต้องอัปเดต
+`api/auth/callback.js`
+
+## ฟีเจอร์ใหม่: ระบบ Sponsor จองสล็อตโฆษณา
+
+### ภาพรวม
+- Sponsor สมัครสมาชิกเอง (บริษัท, เลขภาษี, ที่อยู่, ผู้ติดต่อ ฯลฯ) แก้ไข Profile ได้เอง
+- มีคลัง Content สูงสุด 6 ไฟล์ต่อบัญชี ทุกไฟล์ต้องผ่านการอนุมัติจากทีมงานก่อน ถึงจะเอาไปเลือกใช้ตอนจองได้
+- จองสล็อตแบบปฏิทิน (คล้ายจองตั๋วหนัง) — เลือก Office → เห็นตาราง 3 Slot × 8 สัปดาห์ล่วงหน้า → กด "จอง" ช่องที่ว่าง → เลือกไฟล์จากคลังที่อนุมัติแล้ว → ยืนยัน
+- **จองล่วงหน้าเท่านั้น** ระบบเปิดให้จองตั้งแต่สัปดาห์หน้าเป็นต้นไป (สัปดาห์นี้จองไม่ได้ เพื่อให้ทีมงานมีเวลาตรวจสอบ)
+- ราคาต่อสัปดาห์ตั้งแยกตามแต่ละ Office โดย Admin (แก้ได้ในแท็บ Office Area)
+- **ยังไม่มีระบบชำระเงินออนไลน์** — จองแล้วสถานะเป็น "รอชำระเงิน" (unpaid) ทีมงานติดต่อรับเงินนอกระบบ แล้วกดยืนยันในแท็บ Sponsors → "ยืนยันรับเงิน" (โครงสร้างฐานข้อมูลมีช่อง `payment_method`, `payment_reference` เตรียมไว้ต่อยอดระบบชำระเงินจริงในอนาคตแล้ว)
+
+### ขั้นตอนติดตั้ง
+
+**1. สร้าง Storage Bucket ที่ 2**
+เหมือนกับตอนตั้งค่า `office-content` — เข้า Supabase Storage → New bucket → ตั้งชื่อ **`sponsor-content`** → **ไม่ต้องติ๊ก Public** (private เหมือนกัน) → ตั้ง File size limit 125MB
+
+**2. รัน Migration**
+รัน `migration-sponsor-booking.sql` ใน Supabase SQL Editor
+
+**3. ตั้งราคาต่อ Office**
+เข้า Admin Panel → แท็บ Office Area → ในตาราง "จัดการบัญชี Office" กรอกช่อง "ราคา/สัปดาห์" ของแต่ละ Office แล้วกดบันทึก (ค่าเริ่มต้นคือ 0 ถ้ายังไม่ตั้ง Sponsor จะเห็นราคา 0 บาท)
+
+**4. อัปโหลดไฟล์โค้ดขึ้น GitHub**
+ไฟล์ใหม่:
+- `lib/sponsorAuth.js`
+- `lib/sponsorArea.js`
+- `api/sponsor/index.js`
+- `api/sponsor/action.js`
+
+ไฟล์แก้:
+- `lib/officeArea.js` (เพิ่ม price_per_week ใน query)
+- `api/admin/action.js` (เพิ่ม action จัดการราคา/อนุมัติ content/ยืนยันรับเงิน)
+- `api/admin/[page].js` (เพิ่มแท็บ Sponsors + ช่องราคาในฟอร์ม Office)
+
+**5. Redeploy แล้วทดสอบ**
+- **ฝั่ง Sponsor:** เข้า `https://your-project.vercel.app/api/sponsor/action?action=signup` สมัครสมาชิกทดสอบ → อัปโหลดไฟล์ในแท็บ Content Library
+- **ฝั่ง Admin:** เข้าแท็บ **Sponsors** → เห็นไฟล์รอตรวจสอบ → กดอนุมัติ
+- **กลับไปฝั่ง Sponsor:** แท็บ "จองสล็อต" → เลือก Office → ควรเห็นปุ่ม "จอง" ในตาราง (เพราะมีไฟล์อนุมัติแล้ว) → ลองจองดู
+- **กลับไปฝั่ง Admin:** แท็บ Sponsors ควรเห็นรายการจองใหม่ สถานะ "รอชำระเงิน" → กด "ยืนยันรับเงิน" ทดสอบ
+
+### ⚠️ ข้อจำกัดสำคัญ
+ตอนนี้ระบบใช้ Vercel Serverless Functions ครบ **12 จาก 12** (โควต้าสูงสุดของ Hobby Plan) แล้ว หากต้องการเพิ่มฟีเจอร์ใหม่ที่ต้องสร้างไฟล์ route ใหม่ (ไม่ใช่แค่แก้ไฟล์เดิม) จะต้อง**อัปเกรดเป็น Vercel Pro** ก่อน
+
 ## ดึงข้อมูลไปทำรายงาน
 เข้า Supabase > SQL Editor แล้วรัน query ตามที่ต้องการ เช่น สรุปยอดสแกนรายวันแยกตาม creative:
 
