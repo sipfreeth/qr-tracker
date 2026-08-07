@@ -155,7 +155,7 @@ export default async function handler(req, res) {
   }
 
   // ทางที่ 3: มาจากการกดแลกของรางวัล — เช็คแต้มพอไหม แล้วโชว์ฟอร์มกรอกที่อยู่จัดส่ง
-  // (ยังไม่หักแต้ม/บันทึกอะไรตรงนี้ จะหักตอนกรอกฟอร์มเสร็จแล้วส่งไปที่ api/redeem/confirm.js)
+  // (ยังไม่หักแต้ม/บันทึกอะไรตรงนี้ จะหักตอนกรอกฟอร์มเสร็จแล้วส่งไปที่ api/member-action.js?do=confirm)
   if (parsedState.action === 'redeem') {
     const { data: reward } = await supabase
       .from('rewards')
@@ -315,7 +315,7 @@ function renderRewardsPage(member, rewards, tierScore, spendableBalance) {
           </div>
           ${
             canAfford
-              ? `<a class="btn" href="/api/redeem/${r.id}">แลกเลย</a>`
+              ? `<a class="btn" href="/api/member-action?do=redeem&reward=${r.id}">แลกเลย</a>`
               : `<span class="btn btn-disabled">แต้มไม่พอ</span>`
           }
         </div>`;
@@ -392,7 +392,7 @@ function renderShippingForm(reward, member, token, savedAddresses) {
     <p class="reward-cost">ใช้ ${reward.points_cost.toLocaleString()} Point</p>
     <p style="font-size:13px; color:#6b7280;">กรอกที่อยู่สำหรับจัดส่งของรางวัล — กดยืนยันแล้วแต้มจะถูกหักทันที</p>
     ${savedAddressPicker}
-    <form method="POST" action="/api/redeem/confirm">
+    <form method="POST" action="/api/member-action?do=confirm">
       <input type="hidden" name="token" value="${token}" />
       <label>ชื่อ-นามสกุลผู้รับ</label>
       <input type="text" id="fieldName" name="recipient_name" value="${member.display_name || ''}" required />
