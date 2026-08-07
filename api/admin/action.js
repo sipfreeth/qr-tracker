@@ -284,11 +284,15 @@ export default async function handler(req, res) {
         office_name: params.get('office_name'),
         username: params.get('username'),
         password_hash: hash,
+        price_per_week: Number(params.get('price_per_week') || 0),
       });
     }
 
     if (actionParam === 'office_account_update') {
-      const updates = { office_name: params.get('office_name') };
+      const updates = {
+        office_name: params.get('office_name'),
+        price_per_week: Number(params.get('price_per_week') || 0),
+      };
       const newPassword = params.get('password');
       if (newPassword) updates.password_hash = await bcrypt.hash(newPassword, 10);
       await supabase.from('office_accounts').update(updates).eq('id', params.get('office_id'));
@@ -385,6 +389,41 @@ export default async function handler(req, res) {
     } catch (err) {
       res.status(500).send(err.message);
     }
+    return;
+  }
+
+  // ---------- 9. SPONSOR CONTENT REVIEW (super_admin, admin, staff — ใช้ view_history เป็นตัวแทนสิทธิ์ดูแลทั่วไป) ----------
+  if (actionParam === 'sponsor_content_review') {
+    const contentId = params.get('content_id');
+    const decision = params.get('decision'); // 'approved' หรือ 'rejected'
+    if (!['approved', 'rejected'].includes(decision)) {
+      res.status(400).send('decision ไม่ถูกต้อง');
+      return;
+    }
+    await supabase
+      .from('sponsor_content')
+      .update({ status: decision, reviewed_by: `${admin.username}`, reviewed_at: new Date().toISOString() })
+      .eq('id', contentId);
+    res.writeHead(302, { Location: '/api/admin/sponsors' });
+    res.end();
+    return;
+  }
+
+  // ---------- 10. BOOKING PAYMENT CONFIRMATION (manual — เผื่อระบบชำระเงินอัตโนมัติในอนาคต) ----------
+  if (actionParam === 'booking_mark_paid') {
+    await supabase
+      .from('slot_bookings')
+      .update({ payment_status: 'paid', payment_method: 'manual' })
+      .eq('id', params.get('booking_id'));
+    res.writeHead(302, { Location: '/api/admin/sponsors' });
+    res.end();
+    return;
+  }
+
+  if (actionParam === 'booking_cancel') {
+    await supabase.from('slot_bookings').delete().eq('id', params.get('booking_id'));
+    res.writeHead(302, { Location: '/api/admin/sponsors' });
+    res.end();
     return;
   }
 

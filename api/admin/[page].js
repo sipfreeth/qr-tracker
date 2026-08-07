@@ -13,8 +13,9 @@ import { supabase } from '../../lib/supabaseClient.js';
 import { getTier, TIERS, getTierEvaluationPeriod, getCurrentYearStart } from '../../lib/tiers.js';
 import { requireAdmin, can } from '../../lib/adminAuth.js';
 import { listOfficeAccounts, getOfficeAccount, getSlots, renderOfficeAreaContent } from '../../lib/officeArea.js';
+import { getSignedContentUrl } from '../../lib/sponsorArea.js';
 
-const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins', 'office', 'account'];
+const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins', 'office', 'account', 'sponsors'];
 
 export default async function handler(req, res) {
   const admin = await requireAdmin(req, res);
@@ -35,6 +36,7 @@ export default async function handler(req, res) {
   if (page === 'admins') content = await renderAdminsTab(admin);
   if (page === 'office') content = await renderOfficeTab(admin, req.query.office_id || null);
   if (page === 'account') content = renderAccountTab(admin);
+  if (page === 'sponsors') content = await renderSponsorsTab();
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.status(200).send(renderLayout(page, admin, content));
@@ -800,6 +802,9 @@ function renderOfficeAccountManagement(offices) {
           </td>
           <td>${o.username}</td>
           <td>
+              <input type="number" name="price_per_week" value="${o.price_per_week || 0}" class="table-input" style="width:100px;" step="0.01" />
+          </td>
+          <td>
               <input type="password" name="password" placeholder="(เว้นว่างถ้าไม่เปลี่ยน)" class="table-input" />
           </td>
           <td style="text-align:center;"><button class="btn-small">บันทึก</button></form></td>
@@ -823,19 +828,115 @@ function renderOfficeAccountManagement(offices) {
         <input type="text" name="username" required />
         <label>Password</label>
         <input type="password" name="password" required />
+        <label>ราคาต่อสัปดาห์ (บาท) — สำหรับให้ Sponsor จองสล็อต</label>
+        <input type="number" name="price_per_week" step="0.01" min="0" value="0" />
         <button type="submit" class="btn-primary">เพิ่มบัญชี Office</button>
       </form>
     </div>
     <div class="section">
       <h2>จัดการบัญชี Office ทั้งหมด</h2>
       <table>
-        <tr><th>ชื่อ Office</th><th>Username</th><th>รีเซ็ตรหัสผ่าน</th><th></th><th></th></tr>
-        ${rows || '<tr><td colspan="5" class="muted">ยังไม่มีบัญชี Office</td></tr>'}
+        <tr><th>ชื่อ Office</th><th>Username</th><th>ราคา/สัปดาห์</th><th>รีเซ็ตรหัสผ่าน</th><th></th><th></th></tr>
+        ${rows || '<tr><td colspan="6" class="muted">ยังไม่มีบัญชี Office</td></tr>'}
       </table>
     </div>`;
 }
 
-// ---------- My Account tab (ทุก role เห็น — เปลี่ยนรหัสผ่านตัวเอง) ----------
+// ---------- Sponsors tab: อนุมัติ Content + ยืนยันรับเงินการจอง ----------
+async function renderSponsorsTab() {
+  const [pendingContentRes, bookingsRes] = await Promise.all([
+    supabase
+      .from('sponsor_content')
+      .select('id, file_name, file_path, file_type, created_at, sponsors(company_name)')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true }),
+    supabase
+      .from('slot_bookings')
+      .select('id, slot_number, week_start, price, payment_status, created_at, sponsors(company_name), office_accounts(office_name), sponsor_content(file_name)')
+      .order('week_start', { ascending: true })
+      .limit(50),
+  ]);
+
+  const pendingContent = pendingContentRes.data || [];
+  const bookings = bookingsRes.data || [];
+
+  const contentCards = await Promise.all(
+    pendingContent.map(async (c) => {
+      const url = await getSignedContentUrl(c.file_path);
+      const preview =
+        c.file_type === 'video'
+          ? `<video src="${url}" controls style="width:100%; max-height:160px; border-radius:8px;"></video>`
+          : `<img src="${url}" style="width:100%; max-height:160px; object-fit:cover; border-radius:8px;" />`;
+      return `
+        <div class="content-review-card">
+          ${preview}
+          <p style="font-size:13px; font-weight:600; margin:8px 0 2px;">${c.file_name}</p>
+          <p class="hint">จาก: ${c.sponsors?.company_name || '-'}</p>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <form method="POST" action="/api/admin/action?action=sponsor_content_review" style="display:inline;">
+              <input type="hidden" name="content_id" value="${c.id}" />
+              <input type="hidden" name="decision" value="approved" />
+              <button class="btn-small">อนุมัติ</button>
+            </form>
+            <form method="POST" action="/api/admin/action?action=sponsor_content_review" style="display:inline;">
+              <input type="hidden" name="content_id" value="${c.id}" />
+              <input type="hidden" name="decision" value="rejected" />
+              <button class="btn-small btn-danger">ไม่ผ่าน</button>
+            </form>
+          </div>
+        </div>`;
+    })
+  );
+
+  const bookingRows = bookings
+    .map((b) => {
+      const isPaid = b.payment_status === 'paid';
+      return `
+        <tr>
+          <td>${b.sponsors?.company_name || '-'}</td>
+          <td>${b.office_accounts?.office_name || '-'} — Slot ${b.slot_number}</td>
+          <td>${new Date(b.week_start).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+          <td>${b.sponsor_content?.file_name || '-'}</td>
+          <td style="text-align:right;">${Number(b.price).toLocaleString()} บาท</td>
+          <td style="text-align:center;">
+            ${
+              isPaid
+                ? '<span class="badge-used">ชำระแล้ว</span>'
+                : `<form method="POST" action="/api/admin/action?action=booking_mark_paid" style="display:inline;">
+                     <input type="hidden" name="booking_id" value="${b.id}" />
+                     <button class="btn-small">ยืนยันรับเงิน</button>
+                   </form>`
+            }
+          </td>
+          <td style="text-align:center;">
+            <form method="POST" action="/api/admin/action?action=booking_cancel" onsubmit="return confirm('ยกเลิกการจองนี้?')" style="display:inline;">
+              <input type="hidden" name="booking_id" value="${b.id}" />
+              <button class="btn-small btn-danger">ยกเลิก</button>
+            </form>
+          </td>
+        </tr>`;
+    })
+    .join('');
+
+  return `
+    <div class="section">
+      <h2>Content รอตรวจสอบ (${pendingContent.length})</h2>
+      <div class="content-grid">${contentCards.join('') || '<p class="muted">ไม่มีไฟล์รอตรวจสอบ</p>'}</div>
+    </div>
+    <div class="section">
+      <h2>การจองทั้งหมด</h2>
+      <table>
+        <tr><th>Sponsor</th><th>Office / Slot</th><th>สัปดาห์</th><th>ไฟล์</th><th style="text-align:right;">ราคา</th><th style="text-align:center;">การชำระเงิน</th><th></th></tr>
+        ${bookingRows || '<tr><td colspan="7" class="muted">ยังไม่มีการจอง</td></tr>'}
+      </table>
+    </div>
+    <style>
+      .content-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-top: 12px; }
+      .content-review-card { border: 1px solid #f0f0f0; border-radius: 10px; padding: 10px; }
+    </style>`;
+}
+
+
 function renderAccountTab(admin) {
   return `
     <div class="section">
@@ -862,6 +963,7 @@ function renderLayout(activePage, admin, content) {
     { key: 'rewards', label: 'Rewards' },
     { key: 'campaigns', label: 'Campaigns' },
     { key: 'office', label: 'Office Area' },
+    { key: 'sponsors', label: 'Sponsors' },
   ];
   if (can(admin.role, 'manage_admins') || can(admin.role, 'manage_staff')) tabs.push({ key: 'admins', label: 'Admins' });
   tabs.push({ key: 'account', label: 'My Account' });
