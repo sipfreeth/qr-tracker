@@ -64,7 +64,7 @@ async function renderContentTab(sponsor) {
     ? `
       <div class="section">
         <h2>อัปโหลดไฟล์ใหม่</h2>
-        <p class="hint">JPEG, PNG, MP4 — ไม่เกิน 125MB — ใช้ได้สูงสุด ${MAX_FILES_PER_SPONSOR} ไฟล์ต่อบัญชี (ตอนนี้มี ${items.length}/${MAX_FILES_PER_SPONSOR})</p>
+        <p class="hint">JPEG, PNG, MP4 — ไม่เกิน 10MB — ใช้ได้สูงสุด ${MAX_FILES_PER_SPONSOR} ไฟล์ต่อบัญชี (ตอนนี้มี ${items.length}/${MAX_FILES_PER_SPONSOR})</p>
         <form class="sponsor-upload-form">
           <input type="file" name="file" accept="image/jpeg,image/png,video/mp4" required />
           <button type="submit" class="btn-primary" style="margin-top:10px;">อัปโหลด</button>
@@ -90,7 +90,7 @@ async function renderContentTab(sponsor) {
           const statusEl = form.querySelector('.upload-status');
           const file = fileInput.files[0];
           if (!file) return;
-          if (file.size > 125 * 1024 * 1024) { statusEl.textContent = 'ไฟล์ใหญ่เกิน 125MB'; return; }
+          if (file.size > 10 * 1024 * 1024) { statusEl.textContent = 'ไฟล์ใหญ่เกิน 10MB'; return; }
 
           statusEl.textContent = 'กำลังขอสิทธิ์อัปโหลด...';
           try {
@@ -193,7 +193,7 @@ async function renderBookTab(sponsor, query) {
     .map((w) => `<th style="text-align:center; font-size:12px;">${w.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}</th>`)
     .join('');
 
-  const slotRows = [1, 2, 3]
+  const slotRows = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     .map((slotNum) => {
       const cells = weeks
         .map((w) => {
