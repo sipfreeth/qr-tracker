@@ -340,6 +340,138 @@ values ('ชื่อสาขาใหม่', 'ชื่อ username', crypt('
 ### ⚠️ ข้อจำกัดสำคัญ
 ตอนนี้ระบบใช้ Vercel Serverless Functions ครบ **12 จาก 12** (โควต้าสูงสุดของ Hobby Plan) แล้ว หากต้องการเพิ่มฟีเจอร์ใหม่ที่ต้องสร้างไฟล์ route ใหม่ (ไม่ใช่แค่แก้ไฟล์เดิม) จะต้อง**อัปเกรดเป็น Vercel Pro** ก่อน
 
+## อัปเดต: รวม Serverless Functions ประหยัดโควต้า (12 → 9)
+
+### สิ่งที่เปลี่ยน
+รวม 4 ไฟล์ที่ทำหน้าที่คล้ายกัน (แค่สร้างลิงก์ไป LINE Login ด้วยข้อมูลต่างกัน) เป็นไฟล์เดียว:
+- `api/points.js` + `api/rewards.js` + `api/redeem/[rewardId].js` + `api/redeem/confirm.js` → รวมเป็น **`api/member-action.js`**
+
+### ⚠️ ลิงก์เปลี่ยน — ต้องอัปเดตทุกที่ที่เคยส่งลิงก์เหล่านี้ให้ลูกค้า
+| เดิม | ใหม่ |
+|---|---|
+| `/api/points` | `/api/member-action?do=points` |
+| `/api/rewards` | `/api/member-action?do=rewards` |
+| `/api/redeem/3` | `/api/member-action?do=redeem&reward=3` |
+
+**`/api/qr/[creative]` ไม่เปลี่ยน** เพราะเป็น URL ที่ทำ QR code จริงไปแล้ว
+
+### ขั้นตอนติดตั้ง
+1. **ลบไฟล์เก่าออกจาก GitHub:** `api/points.js`, `api/rewards.js`, `api/redeem/[rewardId].js`, `api/redeem/confirm.js` (ลบทั้งโฟลเดอร์ `api/redeem` ได้เลยถ้าไม่มีไฟล์อื่นเหลือ)
+2. **เพิ่มไฟล์ใหม่:** `api/member-action.js`
+3. **แทนที่ไฟล์:** `api/auth/callback.js` (แก้ลิงก์ให้ชี้ไปที่ endpoint ใหม่)
+4. Redeploy — เช็คว่า Function count ลดลงเหลือ 9 ใน Vercel Dashboard
+
+### ผลลัพธ์
+Function count: **12 → 9** เหลือที่ว่างสำหรับเพิ่มฟีเจอร์ใหม่ได้อีก 3 (หรือรวมเพิ่มได้อีกถ้าต้องการที่ว่างมากกว่านี้ — รวม GET/POST ของ admin, office, sponsor แต่ละคู่เข้าด้วยกันได้อีก 3)
+
+## ฟีเจอร์ใหม่: รับ Log จำนวนรอบการเล่นเนื้อหาจริงจาก CMS
+
+### ภาพรวม
+Endpoint กลางให้ CMS ที่ควบคุมจอ (ยี่ห้อไหนก็ได้ที่รองรับ Webhook) ยิงข้อมูลเข้ามาทุกครั้งที่เล่นเนื้อหาจบ 1 รอบ แล้วแสดงสรุปในแท็บ Office Area (วันนี้/สัปดาห์นี้/เดือนนี้/ทั้งหมด แยกตาม Slot)
+
+### 1. รัน Migration
+รัน `migration-play-logs.sql` ใน Supabase SQL Editor
+
+### 2. เพิ่ม Environment Variable ใหม่
+- `PLAYBACK_WEBHOOK_SECRET` = ตั้งรหัสลับยาวๆ (ใช้ป้องกันไม่ให้คนนอกยิงข้อมูลปลอมเข้ามา)
+
+### 3. ตั้งค่าใน CMS
+เอา URL นี้ไปตั้งเป็น Webhook/Callback ปลายทางใน CMS (วิธีตั้งค่าแตกต่างกันไปแต่ละยี่ห้อ):
+```
+POST https://your-project.vercel.app/api/playback-log?key=ค่าที่ตั้งใน PLAYBACK_WEBHOOK_SECRET
+Content-Type: application/json
+
+{
+  "office_id": 3,
+  "screen_id": "LOBBY-01",
+  "slot_number": 1,
+  "content_label": "promo-video.mp4",
+  "played_at": "2026-08-07T10:30:00Z"
+}
+```
+ทุกฟิลด์ใน body เลือกใส่ได้ตามที่ CMS มีให้ ไม่จำเป็นต้องครบ — `office_id` คือ id ของ Office ในระบบเรา (ดูได้จากแท็บ Office Area)
+
+### 4. ไฟล์ที่ต้องอัปโหลด/แก้บน GitHub
+- ไฟล์ใหม่: `api/playback-log.js`
+- ไฟล์แก้: `api/admin/[page].js` (เพิ่มส่วนแสดงสถิติในแท็บ Office Area)
+
+### 5. ทดสอบ
+ยิง request ทดสอบด้วยเครื่องมืออย่าง Postman หรือ `curl`:
+```bash
+curl -X POST "https://your-project.vercel.app/api/playback-log?key=YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"office_id": 1, "slot_number": 1, "content_label": "test.mp4"}'
+```
+แล้วเข้าแท็บ Office Area ดูว่าตัวเลขขึ้นไหม
+
+## อัปเดตใหญ่: 18 สล็อตต่อ Office + ระบบชำระเงิน (Omise + SlipOK)
+
+### สิ่งที่เพิ่ม
+- **จำนวนสล็อตปรับได้ต่อ Office** (ค่าเริ่มต้น 18) ตั้งได้ในแท็บ Office Area
+- **แท็บ "สล็อตของฉัน" (Bookings)** ฝั่ง Sponsor — ดูรายการที่จองไว้ทั้งหมด เปลี่ยนไฟล์ที่แสดงได้ ยกเลิกได้ (ถ้ายังไม่จ่ายเงิน) และกดชำระเงินได้
+- **ชำระด้วยบัตรเครดิต/เดบิต** ผ่าน Omise รองรับ 3D Secure อัตโนมัติ
+- **ชำระด้วยการโอน/QR** — อัปโหลดสลิป ระบบส่งให้ SlipOK ตรวจสอบยอดเงินอัตโนมัติ ถ้าตรง = ยืนยันจ่ายทันที ถ้าไม่ตรง/ตรวจไม่ผ่าน = ค้างไว้ให้ทีมงานตรวจสอบมือ (เห็นลิงก์ดูสลิปในแท็บ Sponsors)
+- **ไม่เพิ่ม Vercel Function เลย** — ยังคง 10/12 เหมือนเดิม (ใส่ logic เพิ่มในไฟล์ action.js ที่มีอยู่แล้ว)
+
+### ขั้นตอนติดตั้ง
+
+**1. รัน SQL**
+รัน `migration-payments-and-slots.sql` ใน Supabase SQL Editor
+
+**2. สร้าง Storage Bucket ที่ 3**
+เข้า Supabase Storage → New bucket → ชื่อ **`payment-slips`** → **Private** (ไม่ติ๊ก Public)
+
+**3. สมัคร Omise**
+1. สมัครบัญชีที่ omise.co (หรือ opn.ooo ชื่อใหม่ของ Omise)
+2. ไปที่ Dashboard > Keys เก็บค่า **Public Key** และ **Secret Key**
+3. ตั้งค่า Webhook ใน Omise Dashboard ให้ยิงมาที่:
+   ```
+   https://your-project.vercel.app/api/sponsor/action?action=omise_webhook
+   ```
+
+**4. สมัคร SlipOK**
+1. สมัครที่ slipok.com เพื่อขอ API Key และ Branch ID
+2. (ต้องผูกบัญชีธนาคารที่จะรับเงินไว้กับ SlipOK ตามขั้นตอนที่เขากำหนด)
+
+**5. เพิ่ม Environment Variables ใหม่ 5 ตัวใน Vercel**
+- `OMISE_PUBLIC_KEY`
+- `OMISE_SECRET_KEY`
+- `SLIPOK_API_KEY`
+- `SLIPOK_BRANCH_ID`
+- `APP_BASE_URL` = `https://your-project.vercel.app` (ใช้สร้างลิงก์ return หลัง 3D Secure)
+
+**6. อัปโหลดไฟล์โค้ดขึ้น GitHub**
+ไฟล์ใหม่: `lib/payments.js`
+ไฟล์แก้: `lib/sponsorArea.js`, `api/sponsor/index.js`, `api/sponsor/action.js`, `api/admin/action.js`, `api/admin/[page].js`
+
+**7. Redeploy แล้วทดสอบ**
+- ทดสอบบัตร Omise ด้วยเลขบัตรทดสอบของ Omise (มีในเอกสาร Omise sandbox mode ก่อนใช้จริง)
+- ทดสอบโอนเงินจริงยอดน้อยๆ แล้วอัปโหลดสลิปดูว่า SlipOK ตรวจสอบผ่านไหม
+
+### ⚠️ ข้อควรระวัง
+- ควรทดสอบทั้งสองระบบชำระเงินด้วย **Omise Test Mode / โอนเงินยอดจริงน้อยๆ ก่อน** อย่าเพิ่งเปิดให้ลูกค้าใช้จริงจนกว่าจะทดสอบผ่านหมด
+- `SLIPOK_BRANCH_ID` ต้องผูกกับบัญชีธนาคารที่ถูกต้องแล้วเท่านั้น ไม่งั้นจะตรวจสอบสลิปไม่ผ่านเลย
+
+## อัปเดต: หน้าจองแบบใหม่ + จำกัดเวลาชำระเงิน 15 นาที + Super Admin แก้ Sponsor Account
+
+### สิ่งที่เปลี่ยน
+- **หน้าจองใหม่:** เลือก Office → เลือกสัปดาห์ (จาก 4 สัปดาห์ วิ่งไปเรื่อยๆ ทีละสัปดาห์) → ติ๊กเลือกได้หลาย Slot พร้อมกัน → ยืนยันทีเดียว จ่ายเงินรวมครั้งเดียว
+- **จำกัดเวลาชำระเงิน 15 นาที** — จองแล้วมีนับถอยหลังในหน้าชำระเงิน ถ้าไม่จ่ายทันเวลา Slot จะกลับมาว่างให้คนอื่นจองได้อัตโนมัติ (เช็คตอนโหลดหน้าปฏิทิน ไม่ต้องมี background job แยก)
+- **Super Admin แก้ไขข้อมูล Sponsor ได้ทั้งหมด** รวม username (อีเมล) และรีเซ็ตรหัสผ่าน — อยู่ในแท็บ Sponsors (Admin ธรรมดาไม่เห็นส่วนนี้)
+
+### ขั้นตอนติดตั้ง
+
+**1. รัน SQL**
+รัน `migration-booking-expiry.sql` ใน Supabase SQL Editor
+
+**2. อัปโหลดไฟล์โค้ดขึ้น GitHub**
+ไฟล์แก้: `lib/adminAuth.js`, `lib/sponsorArea.js`, `api/sponsor/index.js`, `api/sponsor/action.js`, `api/admin/action.js`, `api/admin/[page].js`
+
+**3. Redeploy แล้วทดสอบ**
+- ลองจองหลาย Slot พร้อมกันในสัปดาห์เดียว เช็คว่ายอดรวมคำนวณถูกไหม
+- ลองปล่อยรายการที่จองไว้ไม่จ่ายเงินเกิน 15 นาที แล้วกลับไปดูปฏิทิน ควรว่างกลับมาให้จองใหม่ได้
+- ล็อกอินด้วยบัญชี Super Admin เข้าแท็บ Sponsors เช็คว่าเห็นฟอร์มแก้ไขบัญชี Sponsor ครบทุกช่อง
+
 ## ดึงข้อมูลไปทำรายงาน
 เข้า Supabase > SQL Editor แล้วรัน query ตามที่ต้องการ เช่น สรุปยอดสแกนรายวันแยกตาม creative:
 

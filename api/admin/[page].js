@@ -13,7 +13,7 @@ import { supabase } from '../../lib/supabaseClient.js';
 import { getTier, TIERS, getTierEvaluationPeriod, getCurrentYearStart } from '../../lib/tiers.js';
 import { requireAdmin, can } from '../../lib/adminAuth.js';
 import { listOfficeAccounts, getOfficeAccount, getSlots, renderOfficeAreaContent } from '../../lib/officeArea.js';
-import { getSignedContentUrl } from '../../lib/sponsorArea.js';
+import { getSignedContentUrl, getSignedSlipUrl } from '../../lib/sponsorArea.js';
 
 const PAGES = ['dashboard', 'members', 'rewards', 'campaigns', 'admins', 'office', 'account', 'sponsors'];
 
@@ -36,7 +36,7 @@ export default async function handler(req, res) {
   if (page === 'admins') content = await renderAdminsTab(admin);
   if (page === 'office') content = await renderOfficeTab(admin, req.query.office_id || null);
   if (page === 'account') content = renderAccountTab(admin);
-  if (page === 'sponsors') content = await renderSponsorsTab();
+  if (page === 'sponsors') content = await renderSponsorsTab(admin);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.status(200).send(renderLayout(page, admin, content));
@@ -786,7 +786,82 @@ async function renderOfficeTab(admin, selectedOfficeId) {
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY,
   });
 
-  return manageSection + picker + officeContent;
+  const playStats = await renderPlaybackStats(officeAccount.id);
+
+  return manageSection + picker + officeContent + playStats;
+}
+
+// ยอดรอบการเล่นเนื้อหาจริงบนจอ (ข้อมูลจาก CMS ที่ยิงเข้ามาทาง /api/playback-log)
+async function renderPlaybackStats(officeAccountId) {
+  const { data: logs } = await supabase
+    .from('content_play_logs')
+    .select('slot_number, screen_id, content_label, played_at')
+    .eq('office_account_id', officeAccountId)
+    .order('played_at', { ascending: false })
+    .limit(500);
+
+  const rows = logs || [];
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayOfWeek = (now.getDay() + 6) % 7;
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(todayStart.getDate() - dayOfWeek);
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const bySlot = { 1: { today: 0, week: 0, month: 0, all: 0 }, 2: { today: 0, week: 0, month: 0, all: 0 }, 3: { today: 0, week: 0, month: 0, all: 0 } };
+  for (const row of rows) {
+    const slot = bySlot[row.slot_number];
+    if (!slot) continue;
+    const playedAt = new Date(row.played_at);
+    slot.all++;
+    if (playedAt >= monthStart) slot.month++;
+    if (playedAt >= weekStart) slot.week++;
+    if (playedAt >= todayStart) slot.today++;
+  }
+
+  const slotRows = [1, 2, 3]
+    .map(
+      (n) => `
+        <tr>
+          <td>Slot ${n}</td>
+          <td style="text-align:right;">${bySlot[n].today.toLocaleString()}</td>
+          <td style="text-align:right;">${bySlot[n].week.toLocaleString()}</td>
+          <td style="text-align:right;">${bySlot[n].month.toLocaleString()}</td>
+          <td style="text-align:right; font-weight:700;">${bySlot[n].all.toLocaleString()}</td>
+        </tr>`
+    )
+    .join('');
+
+  const recentRows = rows
+    .slice(0, 20)
+    .map(
+      (r) => `
+        <tr>
+          <td>${new Date(r.played_at).toLocaleString('th-TH')}</td>
+          <td>${r.slot_number || '-'}</td>
+          <td>${r.screen_id || '-'}</td>
+          <td>${r.content_label || '-'}</td>
+        </tr>`
+    )
+    .join('');
+
+  return `
+    <div class="section">
+      <h2>ยอดรอบการเล่นเนื้อหาจริงบนจอ (จาก CMS)</h2>
+      <p class="hint">ข้อมูลนี้มาจาก CMS ภายนอกที่ยิง Webhook เข้ามาที่ /api/playback-log — ถ้ายังไม่เชื่อมต่อ CMS ตารางนี้จะว่างเปล่า</p>
+      <table>
+        <tr><th></th><th style="text-align:right;">วันนี้</th><th style="text-align:right;">สัปดาห์นี้</th><th style="text-align:right;">เดือนนี้</th><th style="text-align:right;">ทั้งหมด</th></tr>
+        ${slotRows}
+      </table>
+    </div>
+    <div class="section">
+      <h2>Log ล่าสุด (20 รายการ)</h2>
+      <table>
+        <tr><th>เวลา</th><th>Slot</th><th>Screen ID</th><th>ไฟล์ที่เล่น</th></tr>
+        ${recentRows || '<tr><td colspan="4" class="muted">ยังไม่มีข้อมูล</td></tr>'}
+      </table>
+    </div>`;
 }
 
 // จัดการบัญชี Office (สร้าง/แก้ชื่อ-รหัสผ่าน/ลบ) — super_admin, admin เท่านั้น
@@ -803,6 +878,9 @@ function renderOfficeAccountManagement(offices) {
           <td>${o.username}</td>
           <td>
               <input type="number" name="price_per_week" value="${o.price_per_week || 0}" class="table-input" style="width:100px;" step="0.01" />
+          </td>
+          <td>
+              <input type="number" name="sponsor_slot_count" value="${o.sponsor_slot_count || 18}" class="table-input" style="width:70px;" min="1" />
           </td>
           <td>
               <input type="password" name="password" placeholder="(เว้นว่างถ้าไม่เปลี่ยน)" class="table-input" />
@@ -830,21 +908,24 @@ function renderOfficeAccountManagement(offices) {
         <input type="password" name="password" required />
         <label>ราคาต่อสัปดาห์ (บาท) — สำหรับให้ Sponsor จองสล็อต</label>
         <input type="number" name="price_per_week" step="0.01" min="0" value="0" />
+        <label>จำนวนสล็อตสำหรับ Sponsor</label>
+        <input type="number" name="sponsor_slot_count" min="1" value="18" />
         <button type="submit" class="btn-primary">เพิ่มบัญชี Office</button>
       </form>
     </div>
     <div class="section">
       <h2>จัดการบัญชี Office ทั้งหมด</h2>
       <table>
-        <tr><th>ชื่อ Office</th><th>Username</th><th>ราคา/สัปดาห์</th><th>รีเซ็ตรหัสผ่าน</th><th></th><th></th></tr>
-        ${rows || '<tr><td colspan="6" class="muted">ยังไม่มีบัญชี Office</td></tr>'}
+        <tr><th>ชื่อ Office</th><th>Username</th><th>ราคา/สัปดาห์</th><th>จำนวนสล็อต</th><th>รีเซ็ตรหัสผ่าน</th><th></th><th></th></tr>
+        ${rows || '<tr><td colspan="7" class="muted">ยังไม่มีบัญชี Office</td></tr>'}
       </table>
     </div>`;
 }
 
 // ---------- Sponsors tab: อนุมัติ Content + ยืนยันรับเงินการจอง ----------
-async function renderSponsorsTab() {
-  const [pendingContentRes, bookingsRes] = await Promise.all([
+async function renderSponsorsTab(admin) {
+  const canManageSponsors = can(admin.role, 'manage_sponsor_accounts');
+  const [pendingContentRes, bookingsRes, sponsorsRes] = await Promise.all([
     supabase
       .from('sponsor_content')
       .select('id, file_name, file_path, file_type, created_at, sponsors(company_name)')
@@ -852,13 +933,15 @@ async function renderSponsorsTab() {
       .order('created_at', { ascending: true }),
     supabase
       .from('slot_bookings')
-      .select('id, slot_number, week_start, price, payment_status, created_at, sponsors(company_name), office_accounts(office_name), sponsor_content(file_name)')
+      .select('id, slot_number, week_start, price, payment_status, payment_method, payment_reference, payment_slip_path, created_at, sponsors(company_name), office_accounts(office_name), sponsor_content(file_name)')
       .order('week_start', { ascending: true })
       .limit(50),
+    supabase.from('sponsors').select('*').order('company_name'),
   ]);
 
   const pendingContent = pendingContentRes.data || [];
   const bookings = bookingsRes.data || [];
+  const sponsors = sponsorsRes.data || [];
 
   const contentCards = await Promise.all(
     pendingContent.map(async (c) => {
@@ -888,9 +971,15 @@ async function renderSponsorsTab() {
     })
   );
 
-  const bookingRows = bookings
-    .map((b) => {
+  const bookingRows = await Promise.all(
+    bookings.map(async (b) => {
       const isPaid = b.payment_status === 'paid';
+      const methodLabel = { omise: 'บัตร', transfer: 'โอนเงิน', manual: 'ยืนยันมือ' }[b.payment_method] || '-';
+      let slipLink = '-';
+      if (b.payment_slip_path) {
+        const url = await getSignedSlipUrl(b.payment_slip_path);
+        slipLink = url ? `<a href="${url}" target="_blank" class="link">ดูสลิป</a>` : '-';
+      }
       return `
         <tr>
           <td>${b.sponsors?.company_name || '-'}</td>
@@ -898,6 +987,8 @@ async function renderSponsorsTab() {
           <td>${new Date(b.week_start).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
           <td>${b.sponsor_content?.file_name || '-'}</td>
           <td style="text-align:right;">${Number(b.price).toLocaleString()} บาท</td>
+          <td style="text-align:center;">${methodLabel}</td>
+          <td style="text-align:center;">${slipLink}</td>
           <td style="text-align:center;">
             ${
               isPaid
@@ -916,9 +1007,12 @@ async function renderSponsorsTab() {
           </td>
         </tr>`;
     })
-    .join('');
+  );
+
+  const sponsorAccountSection = canManageSponsors ? renderSponsorAccountManagement(sponsors) : '';
 
   return `
+    ${sponsorAccountSection}
     <div class="section">
       <h2>Content รอตรวจสอบ (${pendingContent.length})</h2>
       <div class="content-grid">${contentCards.join('') || '<p class="muted">ไม่มีไฟล์รอตรวจสอบ</p>'}</div>
@@ -926,14 +1020,54 @@ async function renderSponsorsTab() {
     <div class="section">
       <h2>การจองทั้งหมด</h2>
       <table>
-        <tr><th>Sponsor</th><th>Office / Slot</th><th>สัปดาห์</th><th>ไฟล์</th><th style="text-align:right;">ราคา</th><th style="text-align:center;">การชำระเงิน</th><th></th></tr>
-        ${bookingRows || '<tr><td colspan="7" class="muted">ยังไม่มีการจอง</td></tr>'}
+        <tr><th>Sponsor</th><th>Office / Slot</th><th>สัปดาห์</th><th>ไฟล์</th><th style="text-align:right;">ราคา</th><th style="text-align:center;">วิธีชำระ</th><th style="text-align:center;">สลิป</th><th style="text-align:center;">สถานะ</th><th></th></tr>
+        ${bookingRows.join('') || '<tr><td colspan="9" class="muted">ยังไม่มีการจอง</td></tr>'}
       </table>
     </div>
     <style>
       .content-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-top: 12px; }
       .content-review-card { border: 1px solid #f0f0f0; border-radius: 10px; padding: 10px; }
     </style>`;
+}
+
+// จัดการข้อมูลบัญชี Sponsor ทั้งหมด (แก้ไข/ลบ) — super_admin เท่านั้น
+function renderSponsorAccountManagement(sponsors) {
+  const rows = sponsors
+    .map(
+      (s) => `
+      <div class="section" style="margin-bottom:12px;">
+        <form method="POST" action="/api/admin/action?action=sponsor_account_update" class="stack-form" style="max-width:600px;">
+          <input type="hidden" name="sponsor_id" value="${s.id}" />
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div><label>ชื่อบริษัท</label><input type="text" name="company_name" value="${s.company_name || ''}" required /></div>
+            <div><label>อีเมล (username)</label><input type="email" name="email" value="${s.email || ''}" required /></div>
+            <div><label>เลขประจำตัวผู้เสียภาษี</label><input type="text" name="tax_id" value="${s.tax_id || ''}" /></div>
+            <div><label>ชื่อผู้ติดต่อ</label><input type="text" name="contact_name" value="${s.contact_name || ''}" /></div>
+            <div><label>เบอร์โทร</label><input type="text" name="contact_phone" value="${s.contact_phone || ''}" /></div>
+            <div><label>ประเภทธุรกิจ</label><input type="text" name="business_type" value="${s.business_type || ''}" /></div>
+          </div>
+          <label>ที่อยู่</label>
+          <input type="text" name="address" value="${s.address || ''}" />
+          <label>ตั้งรหัสผ่านใหม่ (เว้นว่างถ้าไม่เปลี่ยน)</label>
+          <input type="password" name="password" />
+          <div style="display:flex; gap:8px; margin-top:12px;">
+            <button type="submit" class="btn-primary">บันทึก</button>
+          </div>
+        </form>
+        <form method="POST" action="/api/admin/action?action=sponsor_account_delete" onsubmit="return confirm('ลบบัญชี Sponsor นี้ถาวร? ประวัติการจองทั้งหมดจะหายไปด้วย')" style="margin-top:8px;">
+          <input type="hidden" name="sponsor_id" value="${s.id}" />
+          <button type="submit" class="btn-small btn-danger">ลบบัญชีนี้</button>
+        </form>
+      </div>`
+    )
+    .join('');
+
+  return `
+    <div class="section">
+      <h2>จัดการบัญชี Sponsor (Super Admin เท่านั้น)</h2>
+      <p class="hint">${sponsors.length} บัญชี — แก้ไขข้อมูลบริษัท อีเมล (username) หรือรีเซ็ตรหัสผ่านได้จากตรงนี้</p>
+    </div>
+    ${rows || '<div class="section"><p class="muted">ยังไม่มีบัญชี Sponsor</p></div>'}`;
 }
 
 

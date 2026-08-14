@@ -2,20 +2,37 @@
 //
 // ศูนย์รวม action ของฝั่ง Sponsor (รวมไฟล์เดียวแนวเดียวกับ admin/action.js และ office/action.js
 // เพื่อประหยัดโควต้า Serverless Functions):
-//   GET/POST ?action=signup            — สมัครสมาชิกใหม่
-//   GET/POST ?action=login             — login
-//   GET      ?action=logout            — logout
-//   POST     ?action=update_profile    — แก้ข้อมูลบริษัท
-//   POST     ?action=change_password   — เปลี่ยนรหัสผ่านตัวเอง
-//   POST     ?action=get_upload_url    — ขอ signed URL อัปโหลดไฟล์เข้าคลัง
-//   POST     ?action=save_content      — บันทึกไฟล์หลังอัปโหลดเสร็จ
-//   POST     ?action=delete_content    — ลบไฟล์จากคลัง
-//   POST     ?action=create_booking    — ยืนยันจองสล็อต
+//   GET/POST ?action=signup              — สมัครสมาชิกใหม่
+//   GET/POST ?action=login               — login
+//   GET      ?action=logout              — logout
+//   POST     ?action=update_profile      — แก้ข้อมูลบริษัท
+//   POST     ?action=change_password     — เปลี่ยนรหัสผ่านตัวเอง
+//   POST     ?action=get_upload_url      — ขอ signed URL อัปโหลดไฟล์เข้าคลัง Content
+//   POST     ?action=save_content        — บันทึกไฟล์หลังอัปโหลดเสร็จ
+//   POST     ?action=delete_content      — ลบไฟล์จากคลัง
+//   POST     ?action=create_booking      — จองสล็อตใหม่ (ยังไม่ชำระเงิน)
+//   POST     ?action=update_booking_content — เปลี่ยนไฟล์ที่แสดงของสล็อตที่จองไว้
+//   POST     ?action=cancel_booking      — ยกเลิกสล็อตที่ยังไม่ชำระเงิน
+//   POST     ?action=pay_by_card         — ชำระด้วยบัตร (Omise)
+//   GET      ?action=omise_return        — จุดที่ Omise redirect กลับมาหลัง 3D Secure
+//   POST     ?action=omise_webhook       — Omise ยิงมายืนยันผลการชำระ (ไม่ต้อง login เพราะ Omise เรียกเอง)
+//   POST     ?action=get_slip_upload_url — ขอ signed URL อัปโหลดสลิปโอนเงิน
+//   POST     ?action=verify_slip         — ส่งสลิปให้ SlipOK ตรวจสอบอัตโนมัติ
 
 import bcrypt from 'bcryptjs';
 import { supabase } from '../../lib/supabaseClient.js';
 import { createSponsorSessionCookie, clearSponsorSessionCookie, requireSponsor } from '../../lib/sponsorAuth.js';
-import { createUploadTarget, saveSponsorContent, createBooking } from '../../lib/sponsorArea.js';
+import {
+  createUploadTarget,
+  saveSponsorContent,
+  createBookings,
+  getBookingGroup,
+  updateBookingContent,
+  cancelUnpaidBooking,
+  createSlipUploadTarget,
+  downloadSlipBytes,
+} from '../../lib/sponsorArea.js';
+import { createOmiseCharge, getOmiseCharge, verifySlipWithSlipOK } from '../../lib/payments.js';
 
 async function readBody(req) {
   let body = '';
@@ -113,9 +130,62 @@ export default async function handler(req, res) {
     return;
   }
 
+  // ---------- OMISE WEBHOOK (public — Omise เรียกเอง ไม่มี session cookie ของเรา) ----------
+  if (actionParam === 'omise_webhook') {
+    if (req.method !== 'POST') {
+      res.status(405).send('Method not allowed');
+      return;
+    }
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    let event;
+    try {
+      event = JSON.parse(raw);
+    } catch {
+      res.status(400).send('bad payload');
+      return;
+    }
+
+    const charge = event?.data;
+    if (charge?.object === 'charge' && charge.id && charge.paid) {
+      await supabase
+        .from('slot_bookings')
+        .update({ payment_status: 'paid', payment_method: 'omise' })
+        .eq('omise_charge_id', charge.id);
+    }
+    res.status(200).send('ok');
+    return;
+  }
+
   // ---------- ต่อจากนี้ต้อง login ก่อน ----------
   const sponsor = await requireSponsor(req, res);
   if (!sponsor) return;
+
+  // ---------- OMISE RETURN (redirect กลับมาจากหน้า 3D Secure ของธนาคาร) ----------
+  if (actionParam === 'omise_return') {
+    const groupId = req.query.group_id;
+    const group = await getBookingGroup(groupId, sponsor.id);
+    const chargeId = group[0]?.omise_charge_id;
+    if (!chargeId) {
+      res.writeHead(302, { Location: '/api/sponsor?page=bookings' });
+      res.end();
+      return;
+    }
+    try {
+      const charge = await getOmiseCharge(chargeId);
+      if (charge.paid) {
+        await supabase
+          .from('slot_bookings')
+          .update({ payment_status: 'paid', payment_method: 'omise' })
+          .eq('booking_group_id', groupId);
+      }
+    } catch (err) {
+      console.error('เช็คสถานะ Omise ไม่สำเร็จ:', err.message);
+    }
+    res.writeHead(302, { Location: '/api/sponsor?page=bookings' });
+    res.end();
+    return;
+  }
 
   if (req.method !== 'POST') {
     res.status(405).send('Method not allowed');
@@ -187,11 +257,16 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (actionParam === 'create_booking') {
+  if (actionParam === 'create_bookings') {
     const officeId = params.get('office_id');
-    const slotNumber = Number(params.get('slot_number'));
+    const slotNumbers = params.getAll('slot_numbers').map(Number);
     const weekStart = params.get('week_start');
     const contentId = params.get('sponsor_content_id');
+
+    if (!slotNumbers.length) {
+      res.status(400).send('กรุณาเลือกอย่างน้อย 1 slot');
+      return;
+    }
 
     // เช็คว่าไฟล์ที่เลือกเป็นของ sponsor คนนี้จริง และอนุมัติแล้วจริง (กันแก้ query เอง)
     const { data: contentRow } = await supabase
@@ -212,22 +287,154 @@ export default async function handler(req, res) {
       return;
     }
 
+    let groupId;
     try {
-      await createBooking({
+      const result = await createBookings({
         sponsorId: sponsor.id,
         officeAccountId: officeId,
-        slotNumber,
+        slotNumbers,
         weekStart,
         sponsorContentId: contentId,
-        price: office.price_per_week,
+        pricePerSlot: office.price_per_week,
       });
+      groupId = result.groupId;
     } catch (err) {
-      res.status(400).send('จองไม่สำเร็จ (อาจมีคนจองช่วงนี้ไปก่อนแล้ว) ลองเลือกช่วงอื่น');
+      res.status(400).send(err.message || 'จองไม่สำเร็จ ลองเลือกช่วงอื่น');
       return;
     }
 
-    res.writeHead(302, { Location: '/api/sponsor?page=book&office_id=' + officeId });
+    // จองเสร็จแล้ว พาไปหน้าชำระเงินของรายการนี้ทันที (จ่ายรวมทีเดียวทั้งกลุ่ม)
+    res.writeHead(302, { Location: `/api/sponsor?page=bookings&pay=${groupId}` });
     res.end();
+    return;
+  }
+
+  if (actionParam === 'update_booking_content') {
+    const contentId = params.get('sponsor_content_id');
+    const { data: contentRow } = await supabase
+      .from('sponsor_content')
+      .select('id, status')
+      .eq('id', contentId)
+      .eq('sponsor_id', sponsor.id)
+      .maybeSingle();
+    if (!contentRow || contentRow.status !== 'approved') {
+      res.status(400).send('ไฟล์นี้ยังไม่ผ่านการอนุมัติ หรือไม่ใช่ของบัญชีคุณ');
+      return;
+    }
+    await updateBookingContent(params.get('booking_id'), sponsor.id, contentId);
+    res.writeHead(302, { Location: '/api/sponsor?page=bookings' });
+    res.end();
+    return;
+  }
+
+  if (actionParam === 'cancel_booking') {
+    await cancelUnpaidBooking(params.get('booking_id'), sponsor.id);
+    res.writeHead(302, { Location: '/api/sponsor?page=bookings' });
+    res.end();
+    return;
+  }
+
+  // ---------- ชำระด้วยบัตร (Omise) ----------
+  if (actionParam === 'pay_by_card') {
+    const groupId = params.get('group_id');
+    const group = await getBookingGroup(groupId, sponsor.id);
+    if (!group.length) {
+      res.status(404).json({ error: 'ไม่พบรายการจองนี้' });
+      return;
+    }
+    if (group[0].payment_status === 'paid') {
+      res.status(200).json({ paid: true });
+      return;
+    }
+    const totalPrice = group.reduce((sum, b) => sum + Number(b.price), 0);
+
+    try {
+      const returnUri = `${process.env.APP_BASE_URL}/api/sponsor/action?action=omise_return&group_id=${groupId}`;
+      const charge = await createOmiseCharge({
+        amountBaht: totalPrice,
+        token: params.get('omise_token'),
+        returnUri,
+        description: `Booking group ${groupId}`,
+      });
+
+      await supabase.from('slot_bookings').update({ omise_charge_id: charge.id }).eq('booking_group_id', groupId);
+
+      if (charge.authorize_uri) {
+        // ต้องยืนยันตัวตนแบบ 3D Secure ก่อน — ส่งลิงก์ให้ฝั่งเบราว์เซอร์ redirect ไป
+        res.status(200).json({ redirect: charge.authorize_uri });
+        return;
+      }
+
+      if (charge.paid) {
+        await supabase
+          .from('slot_bookings')
+          .update({ payment_status: 'paid', payment_method: 'omise' })
+          .eq('booking_group_id', groupId);
+        res.status(200).json({ paid: true });
+        return;
+      }
+
+      res.status(200).json({ paid: false, message: charge.failure_message || 'การชำระเงินไม่สำเร็จ' });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+    return;
+  }
+
+  // ---------- อัปโหลด + ตรวจสอบสลิปโอนเงิน (SlipOK) ----------
+  if (actionParam === 'get_slip_upload_url') {
+    const groupId = params.get('group_id');
+    const group = await getBookingGroup(groupId, sponsor.id);
+    if (!group.length) {
+      res.status(404).json({ error: 'ไม่พบรายการจองนี้' });
+      return;
+    }
+    try {
+      const target = await createSlipUploadTarget(sponsor.id, groupId, params.get('file_name') || 'slip.jpg');
+      res.status(200).json(target);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+    return;
+  }
+
+  if (actionParam === 'verify_slip') {
+    const groupId = params.get('group_id');
+    const group = await getBookingGroup(groupId, sponsor.id);
+    if (!group.length) {
+      res.status(404).json({ error: 'ไม่พบรายการจองนี้' });
+      return;
+    }
+    const totalPrice = group.reduce((sum, b) => sum + Number(b.price), 0);
+
+    const filePath = params.get('file_path');
+    try {
+      const fileBytes = await downloadSlipBytes(filePath);
+      const result = await verifySlipWithSlipOK({
+        fileBytes,
+        fileName: 'slip.jpg',
+        expectedAmount: totalPrice,
+      });
+
+      await supabase
+        .from('slot_bookings')
+        .update({ payment_slip_path: filePath, payment_verification: result })
+        .eq('booking_group_id', groupId);
+
+      const isValid = result.success && result.data?.success;
+      if (isValid) {
+        await supabase
+          .from('slot_bookings')
+          .update({ payment_status: 'paid', payment_method: 'transfer', payment_reference: result.data.transRef })
+          .eq('booking_group_id', groupId);
+        res.status(200).json({ paid: true });
+        return;
+      }
+
+      res.status(200).json({ paid: false, message: result.data?.message || 'ตรวจสอบสลิปไม่ผ่าน' });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
     return;
   }
 

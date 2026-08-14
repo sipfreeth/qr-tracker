@@ -285,6 +285,7 @@ export default async function handler(req, res) {
         username: params.get('username'),
         password_hash: hash,
         price_per_week: Number(params.get('price_per_week') || 0),
+        sponsor_slot_count: Number(params.get('sponsor_slot_count') || 18),
       });
     }
 
@@ -292,6 +293,7 @@ export default async function handler(req, res) {
       const updates = {
         office_name: params.get('office_name'),
         price_per_week: Number(params.get('price_per_week') || 0),
+        sponsor_slot_count: Number(params.get('sponsor_slot_count') || 18),
       };
       const newPassword = params.get('password');
       if (newPassword) updates.password_hash = await bcrypt.hash(newPassword, 10);
@@ -422,6 +424,36 @@ export default async function handler(req, res) {
 
   if (actionParam === 'booking_cancel') {
     await supabase.from('slot_bookings').delete().eq('id', params.get('booking_id'));
+    res.writeHead(302, { Location: '/api/admin/sponsors' });
+    res.end();
+    return;
+  }
+
+  // ---------- 11. SPONSOR ACCOUNT MANAGEMENT (super_admin เท่านั้น) ----------
+  if (actionParam === 'sponsor_account_update') {
+    if (!requirePermission(res, admin.role, 'manage_sponsor_accounts')) return;
+
+    const updates = {
+      company_name: params.get('company_name'),
+      tax_id: params.get('tax_id') || null,
+      address: params.get('address') || null,
+      contact_name: params.get('contact_name') || null,
+      contact_phone: params.get('contact_phone') || null,
+      business_type: params.get('business_type') || null,
+      email: (params.get('email') || '').trim().toLowerCase(),
+    };
+    const newPassword = params.get('password');
+    if (newPassword) updates.password_hash = await bcrypt.hash(newPassword, 10);
+
+    await supabase.from('sponsors').update(updates).eq('id', params.get('sponsor_id'));
+    res.writeHead(302, { Location: '/api/admin/sponsors' });
+    res.end();
+    return;
+  }
+
+  if (actionParam === 'sponsor_account_delete') {
+    if (!requirePermission(res, admin.role, 'manage_sponsor_accounts')) return;
+    await supabase.from('sponsors').delete().eq('id', params.get('sponsor_id'));
     res.writeHead(302, { Location: '/api/admin/sponsors' });
     res.end();
     return;
